@@ -1,0 +1,298 @@
+[
+  {
+    "name": "Catalogue",
+    "file_directory": "data\\",
+    "file_name": "library_1_books.csv",
+    "labels": [
+      "Record"
+    ],
+    "add_log": false,
+    "add_event_index": false,
+    "attributes": [
+      {
+        "name": "bookId",
+        "columns": [
+          {
+            "name": "book_id",
+            "dtype": "str"
+          }
+        ],
+        "optional": false
+      },
+      {
+        "name": "title",
+        "columns": [
+          {
+            "name": "title",
+            "dtype": "str"
+          }
+        ],
+        "optional": false
+      },
+      {
+        "name": "authors",
+        "columns": [
+          {
+            "name": "authors",
+            "dtype": "str"
+          }
+        ],
+        "optional": false
+      },
+      {
+        "name": "isbn13",
+        "columns": [
+          {
+            "name": "isbn13",
+            "dtype": "str"
+          }
+        ],
+        "optional": false
+      },
+      {
+        "name": "languageCode",
+        "columns": [
+          {
+            "name": "language_code",
+            "dtype": "str"
+          }
+        ],
+        "optional": false
+      },
+      {
+        "name": "numPages",
+        "columns": [
+          {
+            "name": "num_pages",
+            "dtype": "int"
+          }
+        ],
+        "optional": false
+      },
+      {
+        "name": "publisher",
+        "columns": [
+          {
+            "name": "publisher",
+            "dtype": "str"
+          }
+        ],
+        "optional": false
+      },
+      {
+        "name": "publicationDate",
+        "columns": [
+          {
+            "name": "publication_date",
+            "dtype": "str"
+          }
+        ],
+        "datetime_object": {
+          "format": "M/d/y"
+        },
+        "optional": false
+      },
+      {
+        "name": "libraryId",
+        "columns": [
+          {
+            "name": "library_id",
+            "dtype": "str"
+          }
+        ],
+        "optional": false
+      }
+    ]
+  },
+  {
+    "name": "Members",
+    "file_directory": "data\\",
+    "file_name": "members.csv",
+    "labels": [
+      "Record"
+    ],
+    "add_log": false,
+    "add_event_index": false,
+    "attributes": [
+      {
+        "name": "memberId",
+        "columns": [
+          {
+            "name": "member_id",
+            "dtype": "str"
+          }
+        ],
+        "optional": false
+      },
+      {
+        "name": "firstName",
+        "columns": [
+          {
+            "name": "first_name",
+            "dtype": "str"
+          }
+        ],
+        "optional": false
+      },
+      {
+        "name": "lastName",
+        "columns": [
+          {
+            "name": "last_name",
+            "dtype": "str"
+          }
+        ],
+        "optional": false
+      },
+      {
+        "name": "ageCategory",
+        "columns": [
+          {
+            "name": "age_category",
+            "dtype": "str"
+          }
+        ],
+        "optional": false
+      },
+      {
+        "name": "subscriptionType",
+        "columns": [
+          {
+            "name": "subscription_type",
+            "dtype": "str"
+          }
+        ],
+        "optional": false
+      },
+      {
+        "name": "dateOfBirth",
+        "columns": [
+          {
+            "name": "date_of_birth",
+            "dtype": "str"
+          }
+        ],
+        "datetime_object": {
+          "format": "y-M-d"
+        },
+        "optional": false
+      }
+    ]
+  },
+  {
+    "name": "EventLog",
+    "file_directory": "data\\",
+    "file_name": "event_log.csv",
+    "labels": [
+      "Record"
+    ],
+    "add_log": false,
+    "add_event_index": false,
+    "attributes": [
+      {
+        "name": "timestamp",
+        "columns": [
+          {
+            "name": "timestamp",
+            "dtype": "str"
+          }
+        ],
+        "datetime_object": {
+          "format": "y-M-d H:m:sX",
+          "timezone_offset": "+01"
+        },
+        "optional": false
+      },
+      {
+        "name": "activity",
+        "columns": [
+          {
+            "name": "activity",
+            "dtype": "str"
+          }
+        ],
+        "optional": false
+      },
+      {
+        "name": "memberId",
+        "columns": [
+          {
+            "name": "member_id",
+            "dtype": "str"
+          }
+        ],
+        "optional": false
+      },
+      {
+        "name": "bookId1",
+        "columns": [
+          {
+            "name": "book_id1",
+            "dtype": "str"
+          }
+        ],
+        "optional": true
+      },
+      {
+        "name": "bookId2",
+        "columns": [
+          {
+            "name": "book_id2",
+            "dtype": "str"
+          }
+        ],
+        "optional": true
+      },
+      {
+        "name": "bookId3",
+        "columns": [
+          {
+            "name": "book_id3",
+            "dtype": "str"
+          }
+        ],
+        "optional": true
+      },
+      {
+        "name": "bookId4",
+        "columns": [
+          {
+            "name": "book_id4",
+            "dtype": "str"
+          }
+        ],
+        "optional": true
+      },
+      {
+        "name": "bookId5",
+        "columns": [
+          {
+            "name": "book_id5",
+            "dtype": "str"
+          }
+        ],
+        "optional": true
+      },
+      {
+        "name": "subscriptionType",
+        "columns": [
+          {
+            "name": "subscription_type",
+            "dtype": "str"
+          }
+        ],
+        "optional": true
+      },
+      {
+        "name": "origin",
+        "columns": [
+          {
+            "name": "origin",
+            "dtype": "str"
+          }
+        ],
+        "optional": true
+      }
+    ]
+  }
+]

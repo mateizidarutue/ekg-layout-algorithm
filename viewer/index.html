@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>EKG Viewer</title>
+  <link rel="stylesheet" href="style.css" />
+  <script src="https://cdn.jsdelivr.net/npm/d3@7/dist/d3.min.js"></script>
+</head>
+<body>
+  <div id="app">
+
+    <!-- ── Sidebar ── -->
+    <aside id="sidebar">
+      <header class="sidebar-header">
+        <span id="dataset-label" class="dataset-label">—</span>
+        <span id="panel-view-tag" class="view-tag">OVERVIEW</span>
+      </header>
+
+      <!-- View controls -->
+      <div class="ctrl-group">
+        <div class="ctrl-row" style="margin-bottom:6px">
+          <button id="btn-overview" class="btn btn-primary active">Overview</button>
+          <button id="btn-variants" class="btn btn-primary">Variants</button>
+        </div>
+        <button id="btn-back" class="btn btn-sm btn-back">← Back to overview</button>
+      </div>
+
+      <!-- Camera -->
+      <div class="ctrl-group ctrl-row">
+        <button id="btn-fit" class="btn btn-sm">Fit</button>
+        <button id="btn-reset-zoom" class="btn btn-sm">Reset zoom</button>
+      </div>
+
+      <!-- Detail filters (detail view only) -->
+      <div class="ctrl-group detail-only">
+        <button id="btn-deviants-only" class="btn btn-sm btn-toggle">Deviants only</button>
+        <button id="btn-sync-only" class="btn btn-sm btn-toggle">Sync only</button>
+      </div>
+
+      <!-- Max items slider (detail view only) -->
+      <div class="ctrl-group detail-only">
+        <label class="ctrl-label">Max items
+          <span id="slider-max-items-val" class="ctrl-val">10</span>
+        </label>
+        <input id="slider-max-items" type="range" min="1" max="50" value="10" class="slider" />
+      </div>
+
+      <!-- Edge visibility (not in variants) -->
+      <div class="ctrl-group not-variants">
+        <div class="ctrl-label section-label">Edge layers</div>
+        <label class="toggle-row">
+          <input id="toggle-dfitem" type="checkbox" checked />
+          DF Item
+          <input id="opa-dfitem" type="range" min="0.05" max="1" step="0.05" value="0.7" class="slider slider-inline" />
+          <span id="opa-dfitem-val" class="ctrl-val">0.7</span>
+        </label>
+        <label class="toggle-row">
+          <input id="toggle-dfpo" type="checkbox" />
+          <span id="label-dfpo">DF Case</span>
+          <input id="opa-dfpo" type="range" min="0.05" max="1" step="0.05" value="0.2" class="slider slider-inline" />
+          <span id="opa-dfpo-val" class="ctrl-val">0.2</span>
+        </label>
+        <label class="toggle-row">
+          <input id="toggle-corr" type="checkbox" />
+          CORR
+          <input id="opa-corr" type="range" min="0.05" max="1" step="0.05" value="0.2" class="slider slider-inline" />
+          <span id="opa-corr-val" class="ctrl-val">0.2</span>
+        </label>
+        <label class="toggle-row">
+          <input id="toggle-resources" type="checkbox" />
+          Resources
+        </label>
+        <label class="toggle-row">
+          <input id="toggle-sync" type="checkbox" checked />
+          Sync events
+        </label>
+        <label class="toggle-row detail-only">
+          <input id="toggle-bottleneck" type="checkbox" checked />
+          Bottlenecks
+        </label>
+      </div>
+
+      <!-- Case stats (detail view only) -->
+      <div class="ctrl-group detail-only" id="case-stats-panel">
+        <div class="ctrl-label section-label" id="case-stats-title">Case</div>
+        <div id="case-stats-content"></div>
+      </div>
+
+      <!-- Case entity list -->
+      <div class="ctrl-group po-section">
+        <div class="ctrl-label section-label" id="cases-label">Cases</div>
+        <input id="po-search" type="text" placeholder="Search…" class="search-input" />
+        <div id="po-list" class="po-list"></div>
+      </div>
+
+      <!-- Activity filter -->
+      <div class="ctrl-group act-section">
+        <div class="ctrl-label section-label">
+          Activities
+          <button id="btn-act-all" class="btn btn-xs">All</button>
+          <button id="btn-act-none" class="btn btn-xs">None</button>
+        </div>
+        <div id="activity-list" class="activity-list"></div>
+      </div>
+
+      <!-- Status bar -->
+      <footer class="status-bar">
+        <span id="status-events"></span>
+        <span id="status-po"></span>
+        <span id="status-items" class="detail-only-stat"></span>
+        <span id="status-df" class="detail-only-stat"></span>
+      </footer>
+    </aside>
+
+    <!-- ── Sidebar resize handle ── -->
+    <div id="sidebar-resizer"></div>
+
+    <!-- ── Canvas area ── -->
+    <main class="canvas-area">
+      <div id="canvas-wrap" class="canvas-wrap">
+        <svg id="canvas" class="canvas"></svg>
+
+        <!-- Tooltip -->
+        <div id="tooltip" class="tooltip"></div>
+
+        <!-- Loading overlay -->
+        <div id="loading" class="overlay-center hidden">
+          <div class="spinner"></div>
+          <span>Loading…</span>
+        </div>
+
+        <!-- Dropzone (when no server) -->
+        <div id="dropzone" class="overlay-center hidden">
+          <div class="dropzone-inner">
+            <p>No dataset found.</p>
+            <p class="dropzone-hint">Open a JSON bundle exported by the pipeline:</p>
+            <button id="btn-open-file" class="btn btn-primary">Open file…</button>
+            <input id="file-input" type="file" accept=".json" class="hidden" />
+          </div>
+        </div>
+      </div>
+    </main>
+
+  </div>
+
+  <script type="module" src="src/main.js"></script>
+</body>
+</html>

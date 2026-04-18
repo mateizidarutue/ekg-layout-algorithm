@@ -1,0 +1,4 @@
+promg==0.1.25
+neo4j==5.14.1
+pyyaml>=6.0
+colorama>=0.4.6

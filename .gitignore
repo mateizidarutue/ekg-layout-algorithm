@@ -1,0 +1,9 @@
+node_modules/
+.venv/
+__pycache__/
+*.pyc
+output/*.json
+data/raw/
+_promg_config.yaml
+*.egg-info/
+.DS_Store

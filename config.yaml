@@ -1,0 +1,30 @@
+neo4j:
+  uri: neo4j://127.0.0.1:7687
+  user: neo4j
+  password: neo4j2005
+  default_database: bep1
+
+datasets:
+  library:
+    raw_data: data/raw/library.xes
+    semantic_header: data/semantic_headers/library.json
+    dataset_description: data/semantic_headers/library_DS.json
+    database: library
+
+  bpic19:
+    raw_data: data/raw/bpic19/
+    semantic_header: data/semantic_headers/bpic19.json
+    dataset_description: data/semantic_headers/bpic19_DS.json
+    database: bpic19
+
+  bpic17:
+    raw_data: data/raw/BPI_Challenge_2017.xes
+    semantic_header: data/semantic_headers/bpic17.json
+    dataset_description: data/semantic_headers/bpic17_DS.json
+    database: bpic17
+
+  bpic14:
+    raw_data: data/raw/BPI_Challenge_2014.xes
+    semantic_header: data/semantic_headers/bpic14.json
+    dataset_description: data/semantic_headers/bpic14_DS.json
+    database: bpic14

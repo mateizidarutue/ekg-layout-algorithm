@@ -1,0 +1,136 @@
+[
+  {
+    "name": "BPIC19EventLog",
+    "file_directory": "data\\raw\\bpic19\\",
+    "file_name": "BPI_Challenge_2019.csv",
+    "labels": ["Record"],
+    "add_log": false,
+    "add_index": true,
+    "encoding": "cp1252",
+    "attributes": [
+      {
+        "name": "timestamp",
+        "columns": [{"name": "event time:timestamp", "dtype": "str"}],
+        "datetime_object": {"format": "d-M-y H:m:s.SSS"},
+        "optional": false
+      },
+      {
+        "name": "activity",
+        "columns": [{"name": "event concept:name", "dtype": "str"}],
+        "optional": false
+      },
+      {
+        "name": "purchaseOrderItemId",
+        "columns": [{"name": "case concept:name", "dtype": "str"}],
+        "optional": false
+      },
+      {
+        "name": "resourceId",
+        "columns": [{"name": "event org:resource", "dtype": "str"}],
+        "optional": true
+      },
+      {
+        "name": "purchaseOrderId",
+        "columns": [{"name": "case Purchasing Document", "dtype": "str"}],
+        "optional": true
+      },
+      {
+        "name": "PODocumentType",
+        "columns": [{"name": "case Document Type", "dtype": "str"}],
+        "optional": true
+      },
+      {
+        "name": "itemId",
+        "columns": [{"name": "case Item", "dtype": "str"}],
+        "optional": true
+      },
+      {
+        "name": "itemType",
+        "columns": [{"name": "case Item Type", "dtype": "str"}],
+        "optional": true
+      },
+      {
+        "name": "itemCategory",
+        "columns": [{"name": "case Item Category", "dtype": "str"}],
+        "optional": true
+      },
+      {
+        "name": "hasInvoiceAfterGoodsReceipt",
+        "columns": [{"name": "case GR-Based Inv. Verif.", "dtype": "bool"}],
+        "optional": true
+      },
+      {
+        "name": "hasGoodsReceipt",
+        "columns": [{"name": "case Goods Receipt", "dtype": "bool"}],
+        "optional": true
+      },
+      {
+        "name": "purchaseArea",
+        "columns": [{"name": "case Spend area text", "dtype": "str"}],
+        "optional": true
+      },
+      {
+        "name": "subPurchaseArea",
+        "columns": [{"name": "case Sub spend area text", "dtype": "str"}],
+        "optional": true
+      },
+      {
+        "name": "spendClassification",
+        "columns": [{"name": "case Spend classification text", "dtype": "str"}],
+        "optional": true
+      },
+      {
+        "name": "companyId",
+        "columns": [{"name": "case Company", "dtype": "str"}],
+        "optional": true
+      },
+      {
+        "name": "vendorId",
+        "columns": [{"name": "case Vendor", "dtype": "str"}],
+        "optional": true
+      },
+      {
+        "name": "vendorName",
+        "columns": [{"name": "case Name", "dtype": "str"}],
+        "optional": true
+      },
+      {
+        "name": "itemValue",
+        "columns": [{"name": "event Cumulative net worth (EUR)", "dtype": "float"}],
+        "optional": true
+      },
+      {
+        "name": "index",
+        "columns": [{"name": "eventID ", "dtype": "str"}],
+        "optional": true
+      }
+    ],
+    "samples": [
+      {
+        "population_column": "case concept:name",
+        "ids": [
+          "4507004931_00020",
+          "4507004931_00010",
+          "4507004931_00050",
+          "4507004931_00040",
+          "4507004931_00030",
+          "4507014062_00050",
+          "4507014062_00090",
+          "4507014062_00080",
+          "4507014062_00010",
+          "4507014062_00020",
+          "4507014062_00070",
+          "4507014062_00030",
+          "4507014062_00040",
+          "4507014062_00060",
+          "4507000647_00010",
+          "4507009522_00010",
+          "2000000097_00001",
+          "4507013723_00010",
+          "4507027474_00010",
+          "4507012794_00010"
+        ]
+      }
+    ]
+  }
+]

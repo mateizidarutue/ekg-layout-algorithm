@@ -1,0 +1,192 @@
+{
+  "name": "Library",
+  "version": "1.0.0",
+  "records": [
+    "(record:EventRecord {timestamp, activity, origin})",
+    "(record:BookRecord:Book0Record {bookId, isbn13, authors, title, numPages, languageCode, publicationDate, publisher})",
+    "(record:BookRecord:Book1Record {bookId1})",
+    "(record:BookRecord:Book2Record {bookId2})",
+    "(record:BookRecord:Book3Record {bookId3})",
+    "(record:BookRecord:Book4Record {bookId4})",
+    "(record:BookRecord:Book5Record {bookId5})",
+    "(record:MemberRecord {memberId, OPTIONAL firstName, OPTIONAL lastName, OPTIONAL dateOfBirth, OPTIONAL ageCategory})",
+    "(record:SubscriptionRecord {subscriptionType})",
+    "(record:LibraryRecord {libraryId})"
+  ],
+  "nodes": [
+    {
+      "type": "Event",
+      "constructor": [
+        {
+          "prevalent_record": "(record:EventRecord)",
+          "result": "(e:Event {timestamp:record.timestamp, activity:record.activity})"
+        }
+      ]
+    },
+    {
+      "type": "Activity",
+      "constructor": [
+        {
+          "prevalent_record": "(record:EventRecord)",
+          "result": "(a:Activity {activity:record.activity})",
+          "infer_observed": true
+        }
+      ]
+    },
+    {
+      "type": "Book",
+      "infer_df": true,
+      "constructor": [
+        {
+          "prevalent_record": "(record:Book0Record)",
+          "result": "(a:Entity:Book {sysId: record.bookId, isbn13: record.isbn13, authors: record.authors, title: record.title, numPages: record.numPages, languageCode: record.languageCode, publicationDate: record.publicationDate, publisher: record.publisher})",
+          "infer_corr_from_event_record": false
+        },
+        {
+          "prevalent_record": "(record:Book1Record)",
+          "result": "(a:Entity:Book {sysId: record.bookId1})",
+          "infer_corr_from_event_record": true,
+          "corr_type": "ACTS_ON"
+        },
+        {
+          "prevalent_record": "(record:Book2Record)",
+          "result": "(a:Entity:Book {sysId: record.bookId2})",
+          "infer_corr_from_event_record": true,
+          "corr_type": "ACTS_ON"
+        },
+        {
+          "prevalent_record": "(record:Book3Record)",
+          "result": "(a:Entity:Book {sysId: record.bookId3})",
+          "infer_corr_from_event_record": true,
+          "corr_type": "ACTS_ON"
+        },
+        {
+          "prevalent_record": "(record:Book4Record)",
+          "result": "(a:Entity:Book {sysId: record.bookId4})",
+          "infer_corr_from_event_record": true,
+          "corr_type": "ACTS_ON"
+        },
+        {
+          "prevalent_record": "(record:Book5Record)",
+          "result": "(a:Entity:Book {sysId: record.bookId5})",
+          "infer_corr_from_event_record": true,
+          "corr_type": "ACTS_ON"
+        }
+      ]
+    },
+    {
+      "type": "Member",
+      "infer_df": true,
+      "constructor": [
+        {
+          "prevalent_record": "(record:MemberRecord)",
+          "result": "(a:Entity:Member {sysId: record.memberId, OPTIONAL firstName: record.firstName, OPTIONAL lastName: record.lastName, OPTIONAL dateOfBirth: record.dateOfBirth, OPTIONAL ageCategory: record.ageCategory, OPTIONAL subscriptionType: record.subscriptionType})",
+          "infer_corr_from_event_record": true,
+          "corr_type": "EXECUTED_BY"
+        }
+      ]
+    },
+    {
+      "type": "SubscriptionAttribute",
+      "constructor": [
+        {
+          "prevalent_record": "(record:SubscriptionRecord)",
+          "result": "(a:EntityAttribute:SubscriptionAttribute {subscription: record.subscriptionType})",
+          "infer_corr_from_event_record": true,
+          "corr_type": "UPDATES"
+        }
+      ]
+    },
+    {
+      "type": "Library",
+      "constructor": [
+        {
+          "prevalent_record": "(record:LibraryRecord)",
+          "result": "(a:Entity:Library {sysId: record.libraryId})",
+          "infer_corr_from_event_record": false
+        }
+      ]
+    }
+  ],
+  "relations": [
+    {
+      "type": "IN_CATALOG",
+      "constructor": {
+        "prevalent_record": "(:BookRecord:LibraryRecord)",
+        "from_node": "(l: Library)",
+        "to_node": "(b: Book)",
+        "result": "(l) - [:IN_CATALOG] -> (b)",
+        "model_as_node": false
+      }
+    },
+    {
+      "type": "BORROWED",
+      "constructor": {
+        "prevalent_record": "(:BookRecord:MemberRecord)",
+        "from_node": "(m: Member)",
+        "to_node": "(bc: Book)",
+        "result": "(m) - [:BORROWED] -> (bc)",
+        "model_as_node": true,
+        "infer_corr_from_reified_parents": false
+      }
+    },
+    {
+      "type": "HAS_PROPERTY",
+      "constructor": {
+        "prevalent_record": "(:SubscriptionRecord:MemberRecord)",
+        "from_node": "(m: Member)",
+        "to_node": "(fa: SubscriptionAttribute)",
+        "result": "(m) - [:HAS_PROPERTY] -> (fa)",
+        "model_as_node": false,
+        "infer_corr_from_reified_parents": false
+      }
+    },
+    {
+      "type": "CREATES",
+      "constructor": {
+        "relations": [
+          "MATCH (e:Event {activity: \"Borrow books\"}) - [:EXECUTED_BY] -> (m:Member)",
+          "MATCH (e) - [:ACTS_ON] -> (b:Book)",
+          "MATCH (m) - [:FROM] -> (borrowed:BORROWED)",
+          "MATCH (borrowed)  - [:TO] -> (b)"
+        ],
+        "from_node": "(e:Event)",
+        "to_node": "(borrowed:BORROWED)",
+        "result": "(e) - [:CREATES] -> (borrowed)",
+        "model_as_node": false,
+        "infer_corr_from_reified_parents": false
+      }
+    },
+    {
+      "type": "REMOVES",
+      "constructor": {
+        "relations": [
+          "MATCH (e:Event {activity: \"Return books\"}) - [:EXECUTED_BY] -> (m:Member)",
+          "MATCH (e) - [:ACTS_ON] -> (b:Book)",
+          "MATCH (m) - [:FROM] -> (borrowed:BORROWED)",
+          "MATCH (borrowed)  - [:TO] -> (b)"
+        ],
+        "from_node": "(e:Event)",
+        "to_node": "(borrowed:BORROWED)",
+        "result": "(e) - [:REMOVES] -> (borrowed)",
+        "model_as_node": false,
+        "infer_corr_from_reified_parents": false
+      }
+    },
+    {
+      "type": "MEMBER_OF",
+      "constructor": {
+        "relations": [
+          "MATCH (m:Member) - [:FROM] -> (borrowed:BORROWED)",
+          "MATCH (borrowed)  - [:TO] -> (b:Book)",
+          "MATCH (l:Library) - [:IN_CATALOG] -> (b)"
+        ],
+        "from_node": "(m:Member)",
+        "to_node": "(l:Library)",
+        "result": "(m) - [:MEMBER_OF] -> (l)",
+        "model_as_node": false,
+        "infer_corr_from_reified_parents": false
+      }
+    }
+  ]
+}
