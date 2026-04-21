@@ -9,309 +9,608 @@ const RESOURCE_PALETTE = [
   "#0f766e", "#7c3aed", "#b45309", "#2563eb", "#be123c",
   "#0369a1", "#4d7c0f", "#9333ea", "#b91c1c", "#475569",
 ];
-const PO_ATTR_KEYS = ["Vendor", "Company", "Document_Type", "Source"];
-const ITEM_ATTR_KEYS = ["Item_Type", "Item_Category", "Goods_Receipt", "GR_Based_Inv_Verif"];
 const OVERVIEW_KNN = 4;
 const OVERVIEW_SIM_MIN = 0.34;
 const OVERVIEW_LABEL_ACTIVITY_COUNT = 2;
 const OVERVIEW_MAX_COMMON_SHARE = 0.8;
+const DETAIL_DEFAULT_MAX_ENTITIES = 8;
+const GENERIC_LABELS = new Set(["Entity", "Resource", "EntityAttribute"]);
+const DETAIL_TYPE_ORDER = {
+  library: ["Member", "Book", "Library", "SubscriptionAttribute"],
+  bpic19: ["PurchaseOrder", "PurchaseOrderItem", "Vendor", "Company", "Invoice", "HumanResource", "System", "Resource"],
+};
 
 let _store = null;
 const _overviewCache = new Map();
 
-/**
- * Detect which entity types play the "case" (PO) and "item" (POItem) roles.
- * Prefers explicit PO/POItem names for backward compat; otherwise uses
- * entity count heuristic: fewer entities = case, more = item.
- */
-function _detectEntityTypes(bundle) {
-  const dfTypes = new Set(bundle.df.map(d => d.entity_type).filter(Boolean));
-  if (dfTypes.has("PO") || dfTypes.has("POItem")) return { caseType: "PO", itemType: "POItem" };
-
-  const countByType = {};
-  bundle.entities.forEach(e => {
-    if (e.entity_type) countByType[e.entity_type] = (countByType[e.entity_type] ?? 0) + 1;
-  });
-
-  // Use DF types if available, otherwise all entity types
-  const candidates = dfTypes.size > 0 ? [...dfTypes] : Object.keys(countByType);
-  const sorted = candidates
-    .filter(t => countByType[t])
-    .sort((a, b) => (countByType[a] ?? 0) - (countByType[b] ?? 0));
-
-  return { caseType: sorted[0] ?? "case", itemType: sorted[1] ?? sorted[0] ?? "item" };
+function _inferPrimaryType(labels, fallback = "Entity") {
+  const typed = [...new Set((labels ?? []).filter(Boolean))];
+  const specific = typed.filter(label => !GENERIC_LABELS.has(label)).sort((a, b) => a.localeCompare(b));
+  if (specific.length) return specific[0];
+  const generic = typed.filter(label => label !== "Entity").sort((a, b) => a.localeCompare(b));
+  if (generic.length) return generic[0];
+  return fallback;
 }
 
-/**
- * Build the in-memory store from a JSON bundle (§3 schema).
- * Output shape is identical to the old CSV-based buildStore so that
- * layout.js and the overview modules work unchanged.
- */
+function _normalizeEntity(raw) {
+  const labels = [...new Set(raw.labels ?? [raw.primary_type ?? raw.entity_type].filter(Boolean))]
+    .filter(Boolean);
+  const primaryType = raw.primary_type || _inferPrimaryType(labels, raw.entity_type || "Entity");
+  return {
+    ...raw.properties,
+    entity_id: String(raw.entity_id),
+    id: String(raw.entity_id),
+    entity_type: primaryType,
+    primary_type: primaryType,
+    labels,
+    properties: raw.properties || {},
+  };
+}
+
+function _normalizeEvent(raw) {
+  const props = raw.properties || {};
+  return {
+    ...props,
+    event_id: String(raw.event_id),
+    id: String(raw.event_id),
+    activity: raw.activity ?? "",
+    timestamp: raw.timestamp ?? "",
+    date: new Date(raw.timestamp),
+    properties: props,
+    memberships: [],
+    entity_ids: [],
+    entity_ids_by_type: {},
+    resource_entity_ids: [],
+    resource_labels: [],
+    primary_resource_label: null,
+    case_entity_id: null,
+    item_entity_id: null,
+  };
+}
+
+function _normalizeRelation(raw, entityById) {
+  const sourceId = String(raw.source_entity_id);
+  const targetId = String(raw.target_entity_id);
+  return {
+    source_entity_id: sourceId,
+    target_entity_id: targetId,
+    source_entity_type: raw.source_entity_type || entityById[sourceId]?.primary_type || "Entity",
+    target_entity_type: raw.target_entity_type || entityById[targetId]?.primary_type || "Entity",
+    relation_type: String(raw.relation_type || ""),
+    properties: raw.properties || {},
+    id: `${sourceId}__${raw.relation_type || ""}__${targetId}`,
+  };
+}
+
+function _normalizeCorr(raw, entityById) {
+  const entityId = String(raw.entity_id);
+  const entity = entityById[entityId];
+  return {
+    event_id: String(raw.event_id),
+    entity_id: entityId,
+    relation_type: String(raw.relation_type || "CORR"),
+    entity_type: entity?.primary_type ?? entity?.entity_type ?? "",
+  };
+}
+
+function _resolveDfEntityId(raw, corrByEventId, entityById) {
+  const explicit = String(raw.entity_id || "").trim();
+  if (explicit) return explicit;
+  const sourceIds = new Set((corrByEventId[raw.source_event_id] ?? []).map(edge => edge.entity_id));
+  const targetIds = new Set((corrByEventId[raw.target_event_id] ?? []).map(edge => edge.entity_id));
+  const candidates = [...sourceIds]
+    .filter(id => targetIds.has(id))
+    .filter(id => !raw.entity_type || entityById[id]?.primary_type === raw.entity_type);
+  return candidates[0] ?? "";
+}
+
+function _normalizeDf(raw, corrByEventId, entityById) {
+  const entityId = _resolveDfEntityId(raw, corrByEventId, entityById);
+  return {
+    source_event_id: String(raw.source_event_id),
+    target_event_id: String(raw.target_event_id),
+    source: String(raw.source_event_id),
+    target: String(raw.target_event_id),
+    entity_id: entityId,
+    entityId: entityId,
+    entity_type: raw.entity_type || entityById[entityId]?.primary_type || "",
+    entityType: raw.entity_type || entityById[entityId]?.primary_type || "",
+  };
+}
+
+function _buildContextMaps(events, corr, entities) {
+  const eventById = Object.fromEntries(events.map(event => [event.event_id, event]));
+  const entityById = Object.fromEntries(entities.map(entity => [entity.entity_id, entity]));
+  const corrByEventId = {};
+  const corrByEntityId = {};
+  const eventsByEntityId = {};
+
+  corr.forEach(edge => {
+    const event = eventById[edge.event_id];
+    const entity = entityById[edge.entity_id];
+    if (!event || !entity) return;
+
+    if (!corrByEventId[event.event_id]) corrByEventId[event.event_id] = [];
+    if (!corrByEntityId[entity.entity_id]) corrByEntityId[entity.entity_id] = [];
+    if (!eventsByEntityId[entity.entity_id]) eventsByEntityId[entity.entity_id] = [];
+
+    corrByEventId[event.event_id].push(edge);
+    corrByEntityId[entity.entity_id].push(edge);
+    eventsByEntityId[entity.entity_id].push(event);
+
+    if (!event.entity_ids.includes(entity.entity_id)) event.entity_ids.push(entity.entity_id);
+    if (!event.entity_ids_by_type[entity.primary_type]) event.entity_ids_by_type[entity.primary_type] = [];
+    if (!event.entity_ids_by_type[entity.primary_type].includes(entity.entity_id)) {
+      event.entity_ids_by_type[entity.primary_type].push(entity.entity_id);
+    }
+    event.memberships.push({
+      entity_id: entity.entity_id,
+      entity_type: entity.primary_type,
+      relation_type: edge.relation_type,
+      entity_label: _entityLabel(entity),
+    });
+  });
+
+  Object.values(eventsByEntityId).forEach(list => list.sort(_compareEvents));
+  Object.values(corrByEventId).forEach(list => list.sort((a, b) => a.entity_id.localeCompare(b.entity_id)));
+  events.forEach(event => {
+    Object.keys(event.entity_ids_by_type).forEach(type => {
+      event.entity_ids_by_type[type].sort((a, b) => a.localeCompare(b));
+    });
+  });
+
+  return { eventById, entityById, corrByEventId, corrByEntityId, eventsByEntityId };
+}
+
+function _buildRelationsByEntity(relations) {
+  return relations.reduce((acc, relation) => {
+    if (!acc[relation.source_entity_id]) acc[relation.source_entity_id] = [];
+    if (!acc[relation.target_entity_id]) acc[relation.target_entity_id] = [];
+    acc[relation.source_entity_id].push(relation);
+    acc[relation.target_entity_id].push(relation);
+    return acc;
+  }, {});
+}
+
+function _buildDfByEntity(df) {
+  return df.reduce((acc, edge) => {
+    if (!edge.entity_id) return acc;
+    if (!acc[edge.entity_id]) acc[edge.entity_id] = [];
+    acc[edge.entity_id].push(edge);
+    return acc;
+  }, {});
+}
+
+function _isResourceEntity(entity) {
+  if (!entity) return false;
+  return entity.labels.includes("Resource") || /resource/i.test(entity.primary_type || "");
+}
+
+function _populateEventResourceContext(events, entityById) {
+  events.forEach(event => {
+    const resourceEntities = event.memberships
+      .map(membership => entityById[membership.entity_id])
+      .filter(_isResourceEntity);
+    const resourceLabels = new Set();
+    resourceEntities.forEach(entity => {
+      resourceLabels.add(_entityLabel(entity));
+    });
+    if (_isMeaningfulResource(event.org_resource)) resourceLabels.add(String(event.org_resource));
+
+    event.resource_entity_ids = [...new Set(resourceEntities.map(entity => entity.entity_id))];
+    event.resource_labels = [...resourceLabels].sort((a, b) => a.localeCompare(b));
+    event.primary_resource_label = event.resource_labels[0] ?? null;
+  });
+}
+
+function _buildEntityIdsByType(entities) {
+  return entities.reduce((acc, entity) => {
+    if (!acc[entity.primary_type]) acc[entity.primary_type] = [];
+    acc[entity.primary_type].push(entity.entity_id);
+    return acc;
+  }, {});
+}
+
+function _detectCaseItemLens(store) {
+  const relationCandidates = (store.relations ?? []).filter(edge => edge.relation_type === "HAS_ITEM");
+  if (relationCandidates.length) {
+    const pair = relationCandidates[0];
+    return {
+      caseType: pair.source_entity_type,
+      itemType: pair.target_entity_type,
+    };
+  }
+
+  const dfTypes = [...new Set((store.df ?? []).map(edge => edge.entity_type).filter(Boolean))];
+  if (dfTypes.includes("PO") || dfTypes.includes("POItem")) return { caseType: "PO", itemType: "POItem" };
+
+  const counts = Object.fromEntries(
+    Object.entries(store.entityIdsByType).map(([type, ids]) => [type, ids.length])
+  );
+  const candidates = (dfTypes.length ? dfTypes : Object.keys(counts))
+    .filter(type => counts[type])
+    .sort((a, b) => counts[a] - counts[b] || a.localeCompare(b));
+
+  return {
+    caseType: candidates[0] ?? "Case",
+    itemType: candidates[1] ?? candidates[0] ?? "Item",
+  };
+}
+
+function _buildCaseLens(store) {
+  const { caseType, itemType } = _detectCaseItemLens(store);
+  const caseIdByEventId = {};
+  const itemIdByEventId = {};
+  const eventsByCaseId = {};
+  const eventsByItemId = {};
+  const itemIdsByCaseId = {};
+
+  store.events.forEach(event => {
+    const caseId = event.entity_ids_by_type[caseType]?.[0] ?? null;
+    const itemId = event.entity_ids_by_type[itemType]?.[0] ?? null;
+    event.case_entity_id = caseId;
+    event.item_entity_id = itemId;
+    caseIdByEventId[event.event_id] = caseId;
+    itemIdByEventId[event.event_id] = itemId;
+
+    if (caseId) {
+      if (!eventsByCaseId[caseId]) eventsByCaseId[caseId] = [];
+      eventsByCaseId[caseId].push(event);
+    }
+    if (itemId) {
+      if (!eventsByItemId[itemId]) eventsByItemId[itemId] = [];
+      eventsByItemId[itemId].push(event);
+    }
+    if (caseId && itemId) {
+      if (!itemIdsByCaseId[caseId]) itemIdsByCaseId[caseId] = new Set();
+      itemIdsByCaseId[caseId].add(itemId);
+    }
+  });
+
+  store.corr.forEach(edge => {
+    if (edge.entity_type !== itemType) return;
+    const event = store.eventById[edge.event_id];
+    if (!event || !event.case_entity_id) return;
+    if (!eventsByItemId[edge.entity_id]) eventsByItemId[edge.entity_id] = [];
+    if (!eventsByItemId[edge.entity_id].includes(event)) eventsByItemId[edge.entity_id].push(event);
+    if (!itemIdsByCaseId[event.case_entity_id]) itemIdsByCaseId[event.case_entity_id] = new Set();
+    itemIdsByCaseId[event.case_entity_id].add(edge.entity_id);
+  });
+
+  Object.values(eventsByCaseId).forEach(events => events.sort(_compareEvents));
+  Object.values(eventsByItemId).forEach(events => events.sort(_compareEvents));
+
+  return { caseType, itemType, caseIdByEventId, itemIdByEventId, eventsByCaseId, eventsByItemId, itemIdsByCaseId };
+}
+
 export function buildStore(bundle) {
-  const { caseType, itemType } = _detectEntityTypes(bundle);
+  const entities = (bundle.entities ?? []).map(_normalizeEntity);
+  const events = (bundle.events ?? []).map(_normalizeEvent);
+  const entityIdsByType = _buildEntityIdsByType(entities);
+  const { eventById, entityById } = {
+    eventById: Object.fromEntries(events.map(event => [event.event_id, event])),
+    entityById: Object.fromEntries(entities.map(entity => [entity.entity_id, entity])),
+  };
 
-  const entityTypeById = Object.fromEntries(
-    bundle.entities.map(e => [e.entity_id, e.entity_type])
-  );
-  const entityPropsById = Object.fromEntries(
-    bundle.entities.map(e => [e.entity_id, e.properties || {}])
-  );
+  const corr = (bundle.corr ?? [])
+    .map(raw => _normalizeCorr(raw, entityById))
+    .filter(edge => eventById[edge.event_id] && entityById[edge.entity_id]);
+  const maps = _buildContextMaps(events, corr, entities);
+  const relations = (bundle.relations ?? [])
+    .map(raw => _normalizeRelation(raw, maps.entityById))
+    .filter(edge => maps.entityById[edge.source_entity_id] && maps.entityById[edge.target_entity_id]);
+  const relationsByEntityId = _buildRelationsByEntity(relations);
+  const df = (bundle.df ?? [])
+    .map(raw => _normalizeDf(raw, maps.corrByEventId, maps.entityById))
+    .filter(edge => edge.entity_id && maps.eventById[edge.source] && maps.eventById[edge.target] && maps.entityById[edge.entity_id]);
+  const dfByEntityId = _buildDfByEntity(df);
 
-  // Flatten properties onto each event; add .date, .id alias
-  const events = bundle.events.map(raw => {
-    const e = {
-      ...raw.properties,
-      event_id: raw.event_id,
-      id: raw.event_id,
-      activity: raw.activity,
-      timestamp: raw.timestamp,
-      date: new Date(raw.timestamp),
-      po_id: null,
-      poitem_id: null,
-    };
-    return e;
+  events.forEach(event => {
+    event.memberships = [...event.memberships].sort((a, b) =>
+      a.entity_type.localeCompare(b.entity_type) || a.entity_id.localeCompare(b.entity_id)
+    );
+    event.entity_ids = [...new Set(event.entity_ids)].sort((a, b) => a.localeCompare(b));
+  });
+  _populateEventResourceContext(events, maps.entityById);
+
+  const caseLens = _buildCaseLens({
+    events,
+    corr,
+    eventById: maps.eventById,
+    entityById: maps.entityById,
+    relations,
+    df,
+    entityIdsByType,
   });
 
-  const eventById = Object.fromEntries(events.map(e => [e.event_id, e]));
-  const entityById = Object.fromEntries(
-    bundle.entities.map(e => ({
-      ...e.properties,
-      entity_id: e.entity_id,
-      entity_type: e.entity_type,
-    })).map(e => [e.entity_id, e])
-  );
-
-  // Build event → case/item mappings from corr (generic: caseType plays PO role, itemType plays POItem role)
-  const posByEvent = {};
-  const itemsByEvent = {};
-  bundle.corr.forEach(({ event_id, entity_id }) => {
-    const et = entityTypeById[entity_id];
-    if (et === caseType) {
-      if (!posByEvent[event_id]) posByEvent[event_id] = [];
-      posByEvent[event_id].push(entity_id);
-    } else if (et === itemType) {
-      if (!itemsByEvent[event_id]) itemsByEvent[event_id] = [];
-      itemsByEvent[event_id].push(entity_id);
-    }
-  });
-
-  events.forEach(e => {
-    e.po_id = (posByEvent[e.event_id] || [])[0] || null;
-    e.poitem_id = (itemsByEvent[e.event_id] || [])[0] || null;
-  });
-
-  // Build indexes
-  const eventsByPo = {};
-  const eventsByItem = {};
-  const itemsByPo = {};
-
-  events.forEach(e => {
-    if (e.po_id) {
-      if (!eventsByPo[e.po_id]) eventsByPo[e.po_id] = [];
-      eventsByPo[e.po_id].push(e);
-    }
-    if (e.poitem_id) {
-      if (!eventsByItem[e.poitem_id]) eventsByItem[e.poitem_id] = [];
-      eventsByItem[e.poitem_id].push(e);
-    }
-    if (e.po_id && e.poitem_id) {
-      if (!itemsByPo[e.po_id]) itemsByPo[e.po_id] = new Set();
-      itemsByPo[e.po_id].add(e.poitem_id);
-    }
-  });
-
-  // Handle events correlated to multiple items via the corr array
-  bundle.corr.forEach(({ event_id, entity_id }) => {
-    const et = entityTypeById[entity_id];
-    if (et !== itemType) return;
-    const e = eventById[event_id];
-    if (!e) return;
-    // If this entity_id is not the primary poitem_id, add the event to that item too
-    if (e.poitem_id !== entity_id) {
-      if (!eventsByItem[entity_id]) eventsByItem[entity_id] = [];
-      // Store a contextual copy so poitem_id is correct for timeline rendering
-      const copy = { ...e, poitem_id: entity_id };
-      eventsByItem[entity_id].push(copy);
-    }
-    // Ensure itemsByPo is populated for this corr pair
-    if (e.po_id) {
-      if (!itemsByPo[e.po_id]) itemsByPo[e.po_id] = new Set();
-      itemsByPo[e.po_id].add(entity_id);
-    }
-  });
-
-  // DF indexes
-  const dfItemByEntity = {};
-  const dfPoByPo = {};
-  bundle.df.forEach(d => {
-    const { source_event_id, target_event_id, entity_id, entity_type } = d;
-    const edge = {
-      source: source_event_id,
-      target: target_event_id,
-      entityId: entity_id,
-      entityType: entity_type,
-    };
-    if (entity_type === itemType) {
-      if (!dfItemByEntity[entity_id]) dfItemByEntity[entity_id] = [];
-      dfItemByEntity[entity_id].push(edge);
-    } else if (entity_type === caseType) {
-      if (!dfPoByPo[entity_id]) dfPoByPo[entity_id] = [];
-      dfPoByPo[entity_id].push(edge);
-    }
-  });
-
-  const allActivities = [...new Set(events.map(e => e.activity))].sort();
-  const allResources = [...new Set(events.map(e => e.org_resource).filter(_isMeaningfulResource))].sort();
+  const allActivities = [...new Set(events.map(event => event.activity).filter(Boolean))].sort((a, b) => a.localeCompare(b));
+  const allResources = [...new Set(events.flatMap(event => event.resource_labels ?? []).filter(_isMeaningfulResource))]
+    .sort((a, b) => a.localeCompare(b));
   const activityColorByName = _buildColorMap(allActivities, ACTIVITY_PALETTE);
   const resourceColorByName = _buildColorMap(allResources, RESOURCE_PALETTE, "#94a3b8");
 
-  events.forEach(e => {
-    e.activityColor = activityColorByName[e.activity] ?? "#64748b";
-    e.resourceColor = _isMeaningfulResource(e.org_resource)
-      ? (resourceColorByName[e.org_resource] ?? "#94a3b8")
+  events.forEach(event => {
+    event.activityColor = activityColorByName[event.activity] ?? "#64748b";
+    event.resourceColor = event.primary_resource_label
+      ? (resourceColorByName[event.primary_resource_label] ?? "#94a3b8")
       : "#cbd5e1";
   });
 
-  const poList = Object.entries(eventsByPo)
-    .map(([po, evs]) => ({
-      id: po,
-      eventCount: evs.length,
-      itemCount: itemsByPo[po]?.size ?? 0,
+  const caseList = Object.entries(caseLens.eventsByCaseId)
+    .map(([caseId, caseEvents]) => ({
+      id: caseId,
+      eventCount: caseEvents.length,
+      itemCount: caseLens.itemIdsByCaseId[caseId]?.size ?? 0,
+      entityType: caseLens.caseType,
     }))
-    .sort((a, b) => b.itemCount - a.itemCount || b.eventCount - a.eventCount);
+    .sort((a, b) => b.itemCount - a.itemCount || b.eventCount - a.eventCount || a.id.localeCompare(b.id));
 
-  const poSummaryById = _buildPoSummaries(poList, eventsByPo, itemsByPo);
-  _applyOverviewFeatureSelection(poSummaryById);
-  const poOverviewEdges = _buildOverviewRelations(poSummaryById);
-  const { communities, communityByPoId } = _buildOverviewCommunities(poSummaryById, poOverviewEdges);
+  const caseSummaryById = _buildCaseSummaries(caseList, caseLens.eventsByCaseId, caseLens.itemIdsByCaseId);
+  _applyOverviewFeatureSelection(caseSummaryById);
+  const caseOverviewEdges = _buildOverviewRelations(caseSummaryById);
+  const { communities, communityByCaseId } = _buildOverviewCommunities(caseSummaryById, caseOverviewEdges);
 
   _overviewCache.clear();
   _store = {
     bundle,
+    entities,
+    entityById: maps.entityById,
+    entityIdsByType,
     events,
-    eventById,
-    entityById,
-    entityTypeById,
-    caseType,
-    itemType,
-    eventsByPo,
-    eventsByItem,
-    itemsByPo,
-    dfItemByEntity,
-    dfPoByPo,
+    eventById: maps.eventById,
+    corr,
+    corrByEventId: maps.corrByEventId,
+    corrByEntityId: maps.corrByEntityId,
+    eventsByEntityId: maps.eventsByEntityId,
+    relations,
+    relationsByEntityId,
+    df,
+    dfByEntityId,
+    caseType: caseLens.caseType,
+    itemType: caseLens.itemType,
+    caseIdByEventId: caseLens.caseIdByEventId,
+    itemIdByEventId: caseLens.itemIdByEventId,
+    eventsByCaseId: caseLens.eventsByCaseId,
+    eventsByItemId: caseLens.eventsByItemId,
+    itemIdsByCaseId: caseLens.itemIdsByCaseId,
     allActivities,
     allResources,
     activityColorByName,
     resourceColorByName,
-    poList,
-    poSummaryById,
-    poOverviewEdges,
+    caseList,
+    caseSummaryById,
+    caseOverviewEdges,
     communities,
-    communityByPoId,
+    communityByCaseId,
+    entityList: _buildEntityList(entities, maps.eventsByEntityId),
   };
 
   return _store;
 }
 
 export function getStore() {
-  if (!_store) throw new Error("Store not built — call buildStore() first.");
+  if (!_store) throw new Error("Store not built - call buildStore() first.");
   return _store;
 }
 
-export function getGraph(poId, filters = {}) {
+export function getDetailGraph(options = {}) {
   if (!_store) throw new Error("Store not built.");
-  const { maxItems = 0, itemIds = null } = filters;
-  const scopedItemSet = itemIds ? new Set(itemIds) : null;
+  const anchorEntityId = options.anchorEntityId;
+  const anchorEntity = _store.entityById[anchorEntityId];
+  if (!anchorEntity) throw new Error(`Unknown entity: ${anchorEntityId}`);
 
-  const allItems = [...(_store.itemsByPo[poId] ?? [])]
-    .sort()
-    .filter(item => !scopedItemSet || scopedItemSet.has(item));
-  let items = [...allItems];
-  if (!scopedItemSet && maxItems > 0) items = items.slice(0, maxItems);
-  const itemSet = new Set(items);
+  const maxEntitiesPerType = options.maxEntitiesPerType ?? DETAIL_DEFAULT_MAX_ENTITIES;
+  const compareEntityIds = _resolveCompareEntityIds(anchorEntity, options.compareEntityIds ?? [], options.compareMode, maxEntitiesPerType);
+  const anchorSet = new Set([anchorEntityId, ...compareEntityIds]);
+  const filteredSeedEvents = [...anchorSet].flatMap(entityId => _filterEvents(_store.eventsByEntityId[entityId] ?? [], options));
+  const seedEventIds = new Set(filteredSeedEvents.map(event => event.event_id));
+  const focusScope = _resolveDetailFocusScope(anchorEntity, filteredSeedEvents, seedEventIds);
+  const contextEntityIds = focusScope?.contextEntityIds
+    ? new Set(focusScope.contextEntityIds)
+    : new Set(anchorSet);
 
-  const allEvents = _filterEvents(_store.eventsByPo[poId] ?? [], filters)
-    .filter(e => allItems.includes(e.poitem_id));
-  const events = allEvents.filter(e => itemSet.has(e.poitem_id));
+  if (!focusScope) {
+    seedEventIds.forEach(eventId => {
+      (_store.corrByEventId[eventId] ?? []).forEach(edge => contextEntityIds.add(edge.entity_id));
+    });
+    [...contextEntityIds].forEach(entityId => {
+      (_store.relationsByEntityId[entityId] ?? []).forEach(relation => {
+        contextEntityIds.add(relation.source_entity_id);
+        contextEntityIds.add(relation.target_entity_id);
+      });
+    });
+  }
 
-  const allEventIdSet = new Set(allEvents.map(e => e.event_id));
-  const eventIdSet = new Set(events.map(e => e.event_id));
+  const detailTypeOrder = _resolveDetailTypeOrder(_store.bundle.dataset, contextEntityIds);
+  const enabledTypeSet = options.visibleEntityTypes?.length
+    ? new Set(options.visibleEntityTypes)
+    : new Set(detailTypeOrder);
 
-  const allDfItem = allItems.flatMap(item =>
-    (_store.dfItemByEntity[item] ?? []).filter(
-      edge => allEventIdSet.has(edge.source) && allEventIdSet.has(edge.target)
-    )
+  const entityIdsByType = {};
+  contextEntityIds.forEach(entityId => {
+    const entity = _store.entityById[entityId];
+    if (!entity || !enabledTypeSet.has(entity.primary_type)) return;
+    if (!entityIdsByType[entity.primary_type]) entityIdsByType[entity.primary_type] = [];
+    entityIdsByType[entity.primary_type].push(entityId);
+  });
+
+  const keptEntityIds = new Set();
+  const bands = detailTypeOrder
+    .filter(type => (entityIdsByType[type] ?? []).length > 0)
+    .map(type => {
+      const sortedIds = _sortDetailEntityIds(type, entityIdsByType[type], anchorEntityId, compareEntityIds);
+      const limitedIds = _limitEntityIds(type, sortedIds, maxEntitiesPerType, anchorEntityId, compareEntityIds);
+      limitedIds.forEach(entityId => keptEntityIds.add(entityId));
+      return {
+        entityType: type,
+        entityLabel: _labelizeType(type),
+        lanes: limitedIds.map(entityId => _buildLane(entityId, options)),
+      };
+    });
+
+  const visibleEventIds = focusScope?.visibleEventIds
+    ? new Set([...focusScope.visibleEventIds].filter(eventId => {
+      const event = _store.eventById[eventId];
+      return event && event.memberships?.some(membership => keptEntityIds.has(membership.entity_id));
+    }))
+    : new Set();
+  if (!focusScope?.visibleEventIds) {
+    keptEntityIds.forEach(entityId => {
+      _filterEvents(_store.eventsByEntityId[entityId] ?? [], options).forEach(event => visibleEventIds.add(event.event_id));
+    });
+  }
+
+  bands.forEach(band => {
+    band.lanes = band.lanes.map(lane => {
+      const events = lane.events.filter(event => visibleEventIds.has(event.event_id));
+      const eventIdSet = new Set(events.map(event => event.event_id));
+      const dfEdges = lane.dfEdges.filter(edge => eventIdSet.has(edge.source_event_id) && eventIdSet.has(edge.target_event_id));
+      return {
+        ...lane,
+        events,
+        eventIds: events.map(event => event.event_id),
+        dfEdges,
+        eventCount: events.length,
+        sequence: events.map(event => event.activity).filter(Boolean),
+      };
+    }).filter(lane => lane.eventCount > 0 || lane.entity_id === anchorEntityId);
+  });
+
+  let eventAnchors = [...visibleEventIds]
+    .map(eventId => _buildEventAnchor(eventId, keptEntityIds))
+    .filter(Boolean)
+    .sort((a, b) => _compareEvents(a, b));
+
+  if (options.sharedOnly) {
+    const sharedIds = new Set(eventAnchors.filter(anchor => anchor.sharedEntityIds.length > 1).map(anchor => anchor.event_id));
+    eventAnchors = eventAnchors.filter(anchor => sharedIds.has(anchor.event_id));
+    bands.forEach(band => {
+      band.lanes.forEach(lane => {
+        lane.events = lane.events.filter(event => sharedIds.has(event.event_id));
+        lane.eventIds = lane.events.map(event => event.event_id);
+        lane.dfEdges = lane.dfEdges.filter(edge => sharedIds.has(edge.source_event_id) && sharedIds.has(edge.target_event_id));
+        lane.eventCount = lane.events.length;
+        lane.sequence = lane.events.map(event => event.activity).filter(Boolean);
+      });
+    });
+  }
+
+  const normalizedBands = bands
+    .map(band => ({
+      ...band,
+      lanes: band.lanes.filter(lane => lane.eventCount > 0 || lane.entity_id === anchorEntityId),
+    }))
+    .filter(band => band.lanes.length > 0);
+  const visibleEntityIds = new Set(normalizedBands.flatMap(band => band.lanes.map(lane => lane.entity_id)));
+  eventAnchors = eventAnchors.map(anchor => {
+    const memberships = (anchor.memberships ?? []).filter(membership => visibleEntityIds.has(membership.entity_id));
+    return {
+      ...anchor,
+      memberships,
+      sharedEntityIds: memberships.map(membership => membership.entity_id),
+      sharedEntityTypes: [...new Set(memberships.map(membership => membership.entity_type))],
+    };
+  }).filter(anchor => anchor.memberships.length > 0);
+
+  const eventAnchorById = Object.fromEntries(eventAnchors.map(anchor => [anchor.event_id, anchor]));
+  normalizedBands.forEach(band => {
+    const {
+      dominantSequence, dominantSupport, comparedSequenceCount, hasDominantPattern, sequenceByEntityId, compareSet,
+    } = _analyzeBandPatterns(band, anchorEntity.primary_type, anchorEntityId, compareEntityIds);
+    band.dominantSequence = dominantSequence;
+    band.dominantSupport = dominantSupport;
+    band.comparedSequenceCount = comparedSequenceCount;
+    band.hasDominantPattern = hasDominantPattern;
+    band.compareEntityIds = [...compareSet];
+    band.lanes = band.lanes.map(lane => ({
+      ...lane,
+      sequence: sequenceByEntityId[lane.entity_id]?.sequence ?? [],
+      followsDominant: sequenceByEntityId[lane.entity_id]?.followsDominant ?? false,
+      dominanceState: sequenceByEntityId[lane.entity_id]?.dominanceState ?? "neutral",
+      hasDominantPattern,
+      isCompared: compareSet.has(lane.entity_id),
+      memberships: lane.events.map(event => ({
+        event_id: event.event_id,
+        anchor: eventAnchorById[event.event_id],
+      })).filter(membership => membership.anchor),
+    }));
+  });
+
+  const visibleRelations = _store.relations.filter(edge =>
+    visibleEntityIds.has(edge.source_entity_id) && visibleEntityIds.has(edge.target_entity_id)
   );
-  const dfItem = items.flatMap(item =>
-    (_store.dfItemByEntity[item] ?? []).filter(
-      edge => eventIdSet.has(edge.source) && eventIdSet.has(edge.target)
-    )
-  );
-  const allDfPo = (_store.dfPoByPo[poId] ?? []).filter(
-    edge => allEventIdSet.has(edge.source) && allEventIdSet.has(edge.target)
-  );
-  const dfPo = (_store.dfPoByPo[poId] ?? []).filter(
-    edge => eventIdSet.has(edge.source) && eventIdSet.has(edge.target)
-  );
+  const bottleneckThresholdHours = _annotateBottlenecks(normalizedBands, _store.eventById);
+  const summary = _summarizeDetailGraph(normalizedBands, eventAnchors, visibleRelations, anchorEntity, compareEntityIds, bottleneckThresholdHours);
 
-  const meta = {
-    totalEvents: (_store.eventsByPo[poId] ?? []).filter(e => allItems.includes(e.poitem_id)).length,
-    filteredEvents: events.length,
-    filteredEventsAll: allEvents.length,
-    totalItems: allItems.length,
-    shownItems: items.length,
-    dfItemCount: dfItem.length,
-    dfItemCountAll: allDfItem.length,
-    dfPoCount: dfPo.length,
-    dfPoCountAll: allDfPo.length,
+  return {
+    anchorEntityId,
+    anchorEntityType: anchorEntity.primary_type,
+    anchorEntity,
+    compareEntityIds,
+    caseType: _store.caseType,
+    itemType: _store.itemType,
+    eventAnchors,
+    bands: normalizedBands,
+    sharedEvents: eventAnchors.filter(anchor => anchor.sharedEntityIds.length > 1),
+    crossTypeLinks: _buildCrossTypeLinks(eventAnchors),
+    relations: visibleRelations,
+    summary,
+    scope: focusScope?.scope ?? "neighborhood",
+    visibleEntityTypes: normalizedBands.map(band => band.entityType),
+    visibleEntityIds: [...visibleEntityIds],
   };
+}
 
-  const poAttrs = _store.poSummaryById[poId]?.attrs ?? {};
-  const itemAttrsById = Object.fromEntries(
-    allItems.map(item => [item, _pickAttrs(_store.eventsByItem[item]?.[0], ITEM_ATTR_KEYS)])
-  );
-
-  return { po: poId, items, allItems, events, allEvents, dfItem, allDfItem, dfPo, allDfPo, meta, poAttrs, itemAttrsById };
+export function getGraph(anchorEntityId, filters = {}) {
+  const anchorEntityType = _store?.entityById?.[anchorEntityId]?.primary_type;
+  return getDetailGraph({ anchorEntityId, anchorEntityType, ...filters });
 }
 
 export function getOverviewGraph(filters = {}) {
   if (!_store) throw new Error("Store not built.");
   const { communityId = null, minEdgeWeight = OVERVIEW_SIM_MIN, activities = null } = filters;
 
-  // Recompute edges and communities when an activity filter is active (cached per filter key)
-  let overviewEdges = _store.poOverviewEdges;
-  let communityByPoId = _store.communityByPoId;
+  let overviewEdges = _store.caseOverviewEdges;
+  let communityByCaseId = _store.communityByCaseId;
   if (activities !== null) {
     const cacheKey = [...activities].sort().join("\0");
     if (_overviewCache.has(cacheKey)) {
-      ({ overviewEdges, communityByPoId } = _overviewCache.get(cacheKey));
+      ({ overviewEdges, communityByCaseId } = _overviewCache.get(cacheKey));
     } else {
-      const filteredSummaries = _buildFilteredSummaries(_store.poSummaryById, _store.eventsByPo, activities);
+      const filteredSummaries = _buildFilteredSummaries(_store.caseSummaryById, _store.eventsByCaseId, activities);
       overviewEdges = _buildOverviewRelations(filteredSummaries);
-      ({ communityByPoId } = _buildOverviewCommunities(filteredSummaries, overviewEdges));
-      _overviewCache.set(cacheKey, { overviewEdges, communityByPoId });
+      ({ communityByCaseId } = _buildOverviewCommunities(filteredSummaries, overviewEdges));
+      _overviewCache.set(cacheKey, { overviewEdges, communityByCaseId });
     }
   }
 
   const nodes = [];
   const visibleSet = new Set();
 
-  _store.poList.forEach(po => {
-    const summary = _store.poSummaryById[po.id];
-    const community = communityByPoId[po.id] ?? { id: po.id, label: "Community", hint: "", weightedDegree: 0 };
+  _store.caseList.forEach(item => {
+    const summary = _store.caseSummaryById[item.id];
+    const community = communityByCaseId[item.id] ?? { id: item.id, label: "Community", hint: "", weightedDegree: 0 };
     if (communityId && community.id !== communityId) return;
-    const filteredEvents = _filterEvents(_store.eventsByPo[po.id] ?? [], filters);
+    const filteredEvents = _filterEvents(_store.eventsByCaseId[item.id] ?? [], filters);
     if (filteredEvents.length === 0) return;
-    const filteredItems = new Set(filteredEvents.map(e => e.poitem_id)).size;
+    const filteredItems = new Set(filteredEvents.map(event => event.item_entity_id)).size;
     nodes.push({
-      id: summary.id, label: summary.id, attrs: summary.attrs,
-      displayAttrs: summary.overviewDisplayAttrs, attrKeys: summary.overviewAttrKeys,
+      id: summary.id,
+      label: summary.id,
+      attrs: summary.attrs,
+      displayAttrs: summary.overviewDisplayAttrs,
+      attrKeys: summary.overviewAttrKeys,
       resources: summary.overviewResources,
-      clusterKey: community.id, clusterLabel: community.label,
-      clusterCode: community.code, clusterHint: community.hint,
-      firstDate: summary.firstDate, lastDate: summary.lastDate,
-      totalEvents: summary.eventCount, filteredEvents: filteredEvents.length,
-      totalItems: summary.itemCount, filteredItems,
+      clusterKey: community.id,
+      clusterLabel: community.label,
+      clusterCode: community.code,
+      clusterHint: community.hint,
+      firstDate: summary.firstDate,
+      lastDate: summary.lastDate,
+      totalEvents: summary.eventCount,
+      filteredEvents: filteredEvents.length,
+      totalItems: summary.itemCount,
+      filteredItems,
       resourceCount: summary.overviewResourceCount,
       topResources: summary.overviewTopResources,
       topActivities: summary.topActivities,
@@ -320,8 +619,8 @@ export function getOverviewGraph(filters = {}) {
     visibleSet.add(summary.id);
   });
 
-  const edges = overviewEdges.filter(e =>
-    e.weight >= minEdgeWeight && visibleSet.has(e.source) && visibleSet.has(e.target)
+  const edges = overviewEdges.filter(edge =>
+    edge.weight >= minEdgeWeight && visibleSet.has(edge.source) && visibleSet.has(edge.target)
   );
 
   const degreeById = {};
@@ -332,21 +631,29 @@ export function getOverviewGraph(filters = {}) {
     weightedDegreeById[edge.source] = (weightedDegreeById[edge.source] ?? 0) + edge.weight;
     weightedDegreeById[edge.target] = (weightedDegreeById[edge.target] ?? 0) + edge.weight;
   });
-  nodes.forEach(n => {
-    n.degree = degreeById[n.id] ?? 0;
-    n.weightedDegree = weightedDegreeById[n.id] ?? n.weightedDegree ?? 0;
+  nodes.forEach(node => {
+    node.degree = degreeById[node.id] ?? 0;
+    node.weightedDegree = weightedDegreeById[node.id] ?? node.weightedDegree ?? 0;
   });
 
   const clusters = Object.values(nodes.reduce((acc, node) => {
     if (!acc[node.clusterKey]) {
-      acc[node.clusterKey] = { id: node.clusterKey, label: node.clusterLabel, code: node.clusterCode,
-        hint: node.clusterHint, nodeIds: [], resources: [], attributes: [] };
+      acc[node.clusterKey] = {
+        id: node.clusterKey,
+        label: node.clusterLabel,
+        code: node.clusterCode,
+        hint: node.clusterHint,
+        nodeIds: [],
+        resources: [],
+        attributes: [],
+      };
     }
     acc[node.clusterKey].nodeIds.push(node.id);
     return acc;
   }, {}));
+
   clusters.forEach(cluster => {
-    const members = nodes.filter(n => n.clusterKey === cluster.id);
+    const members = nodes.filter(node => node.clusterKey === cluster.id);
     cluster.count = cluster.nodeIds.length;
     cluster.resources = _aggregateCommunityResources(members);
     cluster.attributes = _aggregateCommunityAttrs(members);
@@ -356,16 +663,21 @@ export function getOverviewGraph(filters = {}) {
 
   return {
     isOverviewNetwork: true,
-    nodes, edges, communityEdges, clusters,
+    nodes,
+    edges,
+    communityEdges,
+    clusters,
     meta: {
-      poCount: nodes.length, totalPoCount: _store.poList.length,
+      caseCount: nodes.length,
+      totalCaseCount: _store.caseList.length,
       clusterCount: clusters.length,
-      overviewEdgeCount: edges.length, overviewCommunityEdgeCount: communityEdges.length,
-      filteredEvents: nodes.reduce((s, n) => s + n.filteredEvents, 0),
-      totalEvents: nodes.reduce((s, n) => s + n.totalEvents, 0),
-      shownItems: nodes.reduce((s, n) => s + n.filteredItems, 0),
-      totalItems: nodes.reduce((s, n) => s + n.totalItems, 0),
-      dfItemCount: 0, dfPoCount: 0, focusCommunityId: communityId,
+      overviewEdgeCount: edges.length,
+      overviewCommunityEdgeCount: communityEdges.length,
+      filteredEvents: nodes.reduce((sum, node) => sum + node.filteredEvents, 0),
+      totalEvents: nodes.reduce((sum, node) => sum + node.totalEvents, 0),
+      shownItems: nodes.reduce((sum, node) => sum + node.filteredItems, 0),
+      totalItems: nodes.reduce((sum, node) => sum + node.totalItems, 0),
+      focusCommunityId: communityId,
     },
   };
 }
@@ -378,27 +690,72 @@ export function getVariantOverview(filters = {}, maxVariants = 12) {
 
   instances.forEach(instance => {
     const key = JSON.stringify(instance.sequence);
-    if (!variantsByKey.has(key)) variantsByKey.set(key, { sequence: [...instance.sequence], instanceIds: [] });
-    variantsByKey.get(key).instanceIds.push(instance.entityId);
+    if (!variantsByKey.has(key)) variantsByKey.set(key, { sequence: [...instance.sequence], instances: [] });
+    variantsByKey.get(key).instances.push(instance);
   });
 
   const variants = [...variantsByKey.entries()]
-    .map(([key, v]) => ({ ...v, count: v.instanceIds.length, frequency: totalInstances > 0 ? v.instanceIds.length / totalInstances : 0, _key: key }))
+    .map(([key, variant]) => ({
+      ...variant,
+      ..._summarizeVariantInstances(variant.instances),
+      count: variant.instances.length,
+      frequency: totalInstances > 0 ? variant.instances.length / totalInstances : 0,
+      _key: key,
+    }))
     .sort((a, b) => b.count - a.count || b.sequence.length - a.sequence.length || a._key.localeCompare(b._key));
 
   const limit = maxVariants > 0 ? maxVariants : variants.length;
-  const shownVariants = variants.slice(0, limit).map((v, i) => ({
-    sequence: v.sequence, instanceIds: v.instanceIds,
-    count: v.count, frequency: v.frequency, isdominant: i === 0,
+  const shownVariants = variants.slice(0, limit).map((variant, index) => ({
+    key: variant._key,
+    sequence: variant.sequence,
+    instanceIds: variant.instanceIds,
+    items: variant.items,
+    members: variant.members,
+    itemCount: variant.itemCount,
+    memberCount: variant.memberCount,
+    eventTotal: variant.eventTotal,
+    eventAverage: variant.eventAverage,
+    avgDurationHours: variant.avgDurationHours,
+    minDurationHours: variant.minDurationHours,
+    maxDurationHours: variant.maxDurationHours,
+    firstDate: variant.firstDate,
+    lastDate: variant.lastDate,
+    topResources: variant.topResources,
+    resourceCount: variant.resourceCount,
+    topActivities: variant.topActivities,
+    rank: index + 1,
+    count: variant.count,
+    frequency: variant.frequency,
+    isdominant: index === 0,
   }));
 
-  return { isVariantOverview: true, variants: shownVariants, totalInstances, variantCount: variants.length };
+  return {
+    isVariantOverview: true,
+    variants: shownVariants,
+    totalInstances,
+    variantCount: variants.length,
+    caseType: _store.caseType,
+    itemType: _store.itemType,
+    summary: {
+      dominantVariantKey: shownVariants[0]?.key ?? null,
+      dominantVariantShare: shownVariants[0]?.frequency ?? 0,
+      dominantVariantCount: shownVariants[0]?.count ?? 0,
+      averageVariantSize: variants.length
+        ? variants.reduce((sum, variant) => sum + variant.count, 0) / variants.length
+        : 0,
+      averageSequenceLength: variants.length
+        ? variants.reduce((sum, variant) => sum + variant.sequence.length, 0) / variants.length
+        : 0,
+    },
+  };
 }
 
 export function getActivityDfGraph(filters = {}) {
   if (!_store) throw new Error("Store not built.");
   const instances = _collectItemSequences(filters);
-  const nodeCountByActivity = {}, nodeIndexSumByActivity = {}, nodePosCountByActivity = {};
+  const nodeCountByActivity = {};
+  const nodeIndexSumByActivity = {};
+  const nodePosCountByActivity = {};
   const edgeByKey = new Map();
 
   instances.forEach(instance => {
@@ -409,62 +766,458 @@ export function getActivityDfGraph(filters = {}) {
     });
     for (let i = 0; i < instance.sequence.length - 1; i++) {
       const key = `${instance.sequence[i]}__${instance.sequence[i + 1]}`;
-      if (!edgeByKey.has(key)) edgeByKey.set(key, { source: instance.sequence[i], target: instance.sequence[i + 1], count: 0 });
+      if (!edgeByKey.has(key)) {
+        edgeByKey.set(key, { source: instance.sequence[i], target: instance.sequence[i + 1], count: 0 });
+      }
       edgeByKey.get(key).count += 1;
     }
   });
 
   const nodes = Object.entries(nodeCountByActivity)
-    .map(([id, count]) => ({ id, label: id, count, avgIndex: (nodeIndexSumByActivity[id] ?? 0) / Math.max(nodePosCountByActivity[id] ?? 1, 1) }))
+    .map(([id, count]) => ({
+      id,
+      label: id,
+      count,
+      avgIndex: (nodeIndexSumByActivity[id] ?? 0) / Math.max(nodePosCountByActivity[id] ?? 1, 1),
+    }))
     .sort((a, b) => a.avgIndex - b.avgIndex || b.count - a.count || a.label.localeCompare(b.label));
   const edges = [...edgeByKey.values()].sort((a, b) => b.count - a.count || a.source.localeCompare(b.source));
   return { nodes, edges };
 }
 
-export function getResourcesForPo(poId) {
+function _summarizeVariantInstances(instances) {
+  const itemMap = new Map();
+  const memberMap = new Map();
+  const resourceCounts = {};
+  const activityCounts = {};
+  let eventTotal = 0;
+  let durationTotal = 0;
+  let durationCount = 0;
+  let minDurationHours = Infinity;
+  let maxDurationHours = -Infinity;
+  let minTime = Infinity;
+  let maxTime = -Infinity;
+
+  (instances ?? []).forEach(instance => {
+    const itemId = instance.entityId;
+    const itemEntity = _store.entityById[itemId];
+    const events = (instance.eventIds ?? [])
+      .map(eventId => _store.eventById[eventId])
+      .filter(Boolean)
+      .sort(_compareEvents);
+
+    if (!itemMap.has(itemId)) {
+      itemMap.set(itemId, {
+        id: itemId,
+        label: _entityLabel(itemEntity),
+        eventCount: 0,
+      });
+    }
+    itemMap.get(itemId).eventCount += events.length;
+    eventTotal += events.length;
+
+    const memberIdsForItem = new Set(events.map(event => event.case_entity_id).filter(Boolean));
+    if (!memberIdsForItem.size && instance.caseId) memberIdsForItem.add(instance.caseId);
+
+    events.forEach(event => {
+      const timestamp = event.date?.getTime?.();
+      if (Number.isFinite(timestamp)) {
+        minTime = Math.min(minTime, timestamp);
+        maxTime = Math.max(maxTime, timestamp);
+      }
+      if (event.activity) activityCounts[event.activity] = (activityCounts[event.activity] ?? 0) + 1;
+      (event.resource_labels ?? []).forEach(resource => {
+        resourceCounts[resource] = (resourceCounts[resource] ?? 0) + 1;
+      });
+    });
+
+    const durationHours = events.length > 1 ? _hoursBetween(events[0]?.date, events.at(-1)?.date) : 0;
+    if (Number.isFinite(durationHours)) {
+      durationTotal += durationHours;
+      durationCount += 1;
+      minDurationHours = Math.min(minDurationHours, durationHours);
+      maxDurationHours = Math.max(maxDurationHours, durationHours);
+    }
+
+    memberIdsForItem.forEach(memberId => {
+      const memberEntity = _store.entityById[memberId];
+      if (!memberMap.has(memberId)) {
+        memberMap.set(memberId, {
+          id: memberId,
+          label: _entityLabel(memberEntity),
+          itemCount: 0,
+          eventCount: 0,
+        });
+      }
+      const memberEntry = memberMap.get(memberId);
+      memberEntry.itemCount += 1;
+      memberEntry.eventCount += events.filter(event => !event.case_entity_id || event.case_entity_id === memberId).length || events.length;
+    });
+  });
+
+  const items = [...itemMap.values()]
+    .sort((a, b) => b.eventCount - a.eventCount || a.label.localeCompare(b.label));
+  const members = [...memberMap.values()]
+    .sort((a, b) => b.itemCount - a.itemCount || b.eventCount - a.eventCount || a.label.localeCompare(b.label));
+  const topResources = Object.entries(resourceCounts)
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .slice(0, 5)
+    .map(([label, count]) => ({ label, count }));
+  const topActivities = Object.entries(activityCounts)
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .slice(0, 5)
+    .map(([activity, count]) => ({ activity, count }));
+
+  return {
+    instanceIds: items.map(item => item.id),
+    items,
+    members,
+    itemCount: items.length,
+    memberCount: members.length,
+    eventTotal,
+    eventAverage: items.length ? eventTotal / items.length : 0,
+    avgDurationHours: durationCount ? durationTotal / durationCount : NaN,
+    minDurationHours: durationCount ? minDurationHours : NaN,
+    maxDurationHours: durationCount ? maxDurationHours : NaN,
+    firstDate: Number.isFinite(minTime) ? new Date(minTime) : null,
+    lastDate: Number.isFinite(maxTime) ? new Date(maxTime) : null,
+    topResources,
+    resourceCount: Object.keys(resourceCounts).length,
+    topActivities,
+  };
+}
+
+export function getResourcesForEntity(entityId) {
   if (!_store) return [];
-  return [...new Set((_store.eventsByPo[poId] ?? []).map(e => e.org_resource).filter(_isMeaningfulResource))].sort();
+  return [...new Set((_store.eventsByEntityId[entityId] ?? []).flatMap(event => event.resource_labels ?? []))].sort((a, b) => a.localeCompare(b));
 }
 
-export function getActivityCountsForPo(poId) {
+export function getActivityCountsForEntity(entityId) {
   if (!_store) return {};
-  return _countBy(_store.eventsByPo[poId] ?? [], e => e.activity);
+  return _countBy(_store.eventsByEntityId[entityId] ?? [], event => event.activity);
 }
 
-// ── Internal helpers (same logic as old filters.js) ────────────────────────
+function _buildEntityList(entities, eventsByEntityId) {
+  return [...entities]
+    .map(entity => ({
+      id: entity.entity_id,
+      label: _entityLabel(entity),
+      type: entity.primary_type,
+      eventCount: (eventsByEntityId[entity.entity_id] ?? []).length,
+    }))
+    .sort((a, b) => a.type.localeCompare(b.type) || b.eventCount - a.eventCount || a.label.localeCompare(b.label));
+}
+
+function _resolveDetailFocusScope(anchorEntity, filteredSeedEvents, seedEventIds) {
+  if (!_store?.itemType || !_store?.caseType) return null;
+  if (anchorEntity.primary_type !== _store.itemType) return null;
+
+  const contextEntityIds = new Set([anchorEntity.entity_id]);
+  filteredSeedEvents.forEach(event => {
+    (event.memberships ?? []).forEach(membership => {
+      if (membership.entity_id === anchorEntity.entity_id) {
+        contextEntityIds.add(membership.entity_id);
+      } else if (membership.entity_type === _store.caseType) {
+        contextEntityIds.add(membership.entity_id);
+      }
+    });
+  });
+
+  return {
+    scope: "item-focus",
+    contextEntityIds,
+    visibleEventIds: new Set(seedEventIds),
+  };
+}
+
+function _resolveCompareEntityIds(anchorEntity, explicitIds, compareMode, limit) {
+  const explicit = [...new Set((explicitIds ?? []).filter(id =>
+    _store.entityById[id]?.primary_type === anchorEntity.primary_type && id !== anchorEntity.entity_id
+  ))];
+  if (explicit.length) return explicit;
+  if (!compareMode) return [];
+  return _pickPeerEntities(anchorEntity.entity_id, anchorEntity.primary_type, limit - 1);
+}
+
+function _pickPeerEntities(anchorEntityId, entityType, limit) {
+  const anchorEvents = _store.eventsByEntityId[anchorEntityId] ?? [];
+  const anchorCounts = _countBy(anchorEvents, event => event.activity);
+  const candidates = (_store.entityIdsByType[entityType] ?? [])
+    .filter(entityId => entityId !== anchorEntityId)
+    .map(entityId => {
+      const events = _store.eventsByEntityId[entityId] ?? [];
+      return {
+        entityId,
+        score: _cosineSimilarity(anchorCounts, _countBy(events, event => event.activity)),
+        eventCount: events.length,
+      };
+    })
+    .sort((a, b) => b.score - a.score || b.eventCount - a.eventCount || a.entityId.localeCompare(b.entityId));
+  return candidates.slice(0, Math.max(limit, 0)).map(candidate => candidate.entityId);
+}
+
+function _resolveDetailTypeOrder(datasetName, contextEntityIds) {
+  const datasetKey = String(datasetName ?? "").toLowerCase();
+  const preferred = DETAIL_TYPE_ORDER[datasetKey] ?? [];
+  const available = [...new Set([...contextEntityIds].map(entityId => _store.entityById[entityId]?.primary_type).filter(Boolean))]
+    .sort((a, b) => a.localeCompare(b));
+  const ordered = [...preferred.filter(type => available.includes(type)), ...available.filter(type => !preferred.includes(type))];
+  return ordered;
+}
+
+function _sortDetailEntityIds(type, entityIds, anchorEntityId, compareEntityIds) {
+  const compareSet = new Set(compareEntityIds);
+  return [...entityIds].sort((a, b) => {
+    const aPriority = a === anchorEntityId ? 0 : compareSet.has(a) ? 1 : 2;
+    const bPriority = b === anchorEntityId ? 0 : compareSet.has(b) ? 1 : 2;
+    if (aPriority !== bPriority) return aPriority - bPriority;
+    const aEvents = (_store.eventsByEntityId[a] ?? []).length;
+    const bEvents = (_store.eventsByEntityId[b] ?? []).length;
+    return bEvents - aEvents || _entityLabel(_store.entityById[a]).localeCompare(_entityLabel(_store.entityById[b]));
+  });
+}
+
+function _limitEntityIds(type, sortedIds, limit, anchorEntityId, compareEntityIds) {
+  const keep = [];
+  const mustKeep = new Set([anchorEntityId, ...compareEntityIds].filter(entityId => _store.entityById[entityId]?.primary_type === type));
+  sortedIds.forEach(entityId => {
+    if (mustKeep.has(entityId) || keep.length < limit) keep.push(entityId);
+  });
+  return [...new Set(keep)];
+}
+
+function _buildLane(entityId, filters) {
+  const entity = _store.entityById[entityId];
+  const events = _filterEvents(_store.eventsByEntityId[entityId] ?? [], filters).sort(_compareEvents);
+  const dfEdges = (_store.dfByEntityId[entityId] ?? [])
+    .filter(edge => events.some(event => event.event_id === edge.source_event_id) && events.some(event => event.event_id === edge.target_event_id))
+    .map(edge => ({
+      ...edge,
+      gapHours: _hoursBetween(_store.eventById[edge.source_event_id]?.date, _store.eventById[edge.target_event_id]?.date),
+      isBottleneck: false,
+    }));
+  const traced = _traceEntityPath(events, dfEdges, _store.eventById);
+  const eventById = Object.fromEntries(events.map(event => [event.event_id, event]));
+  const sequence = traced.eventIds.map(eventId => eventById[eventId]?.activity).filter(Boolean);
+  const relationEdges = (_store.relationsByEntityId[entityId] ?? [])
+    .filter(edge => _store.entityById[edge.source_entity_id] && _store.entityById[edge.target_entity_id]);
+  return {
+    entity_id: entity.entity_id,
+    entityType: entity.primary_type,
+    entityLabel: _entityLabel(entity),
+    entity,
+    events,
+    eventIds: events.map(event => event.event_id),
+    dfEdges,
+    relationEdges,
+    sequence,
+    attrs: entity.properties || {},
+    eventCount: events.length,
+  };
+}
+
+function _buildEventAnchor(eventId, visibleEntityIds) {
+  const event = _store.eventById[eventId];
+  if (!event) return null;
+  const memberships = (event.memberships ?? []).filter(membership => visibleEntityIds.has(membership.entity_id));
+  if (!memberships.length) return null;
+  const sharedEntityIds = memberships.map(membership => membership.entity_id);
+  const sharedEntityTypes = [...new Set(memberships.map(membership => membership.entity_type))];
+  return {
+    ...event,
+    memberships,
+    sharedEntityIds,
+    sharedEntityTypes,
+    isSharedEvent: sharedEntityIds.length > 1,
+  };
+}
+
+function _buildCrossTypeLinks(eventAnchors) {
+  return eventAnchors
+    .filter(anchor => anchor.sharedEntityIds.length > 1)
+    .flatMap(anchor => {
+      const memberships = anchor.memberships ?? [];
+      const links = [];
+      for (let i = 0; i < memberships.length; i++) {
+        for (let j = i + 1; j < memberships.length; j++) {
+          links.push({
+            id: `${anchor.event_id}__${memberships[i].entity_id}__${memberships[j].entity_id}`,
+            event_id: anchor.event_id,
+            source_entity_id: memberships[i].entity_id,
+            target_entity_id: memberships[j].entity_id,
+            source_entity_type: memberships[i].entity_type,
+            target_entity_type: memberships[j].entity_type,
+          });
+        }
+      }
+      return links;
+    });
+}
+
+function _analyzeBandPatterns(band, anchorType, anchorEntityId, compareEntityIds) {
+  const compareSet = band.entityType === anchorType
+    ? new Set([anchorEntityId, ...compareEntityIds].filter(entityId => band.lanes.some(lane => lane.entity_id === entityId)))
+    : new Set(band.lanes.map(lane => lane.entity_id));
+
+  const sequenceCounts = new Map();
+  const sequenceByEntityId = {};
+  const comparedSequenceCount = band.lanes.filter(lane => compareSet.has(lane.entity_id) && lane.sequence.length).length;
+  band.lanes.forEach(lane => {
+    const key = JSON.stringify(lane.sequence ?? []);
+    if (compareSet.has(lane.entity_id) && lane.sequence.length) {
+      sequenceCounts.set(key, (sequenceCounts.get(key) ?? 0) + 1);
+    }
+    sequenceByEntityId[lane.entity_id] = {
+      sequence: lane.sequence,
+      followsDominant: false,
+      dominanceState: "neutral",
+    };
+  });
+
+  const dominantKey = [...sequenceCounts.entries()]
+    .sort((a, b) => b[1] - a[1] || JSON.parse(b[0]).length - JSON.parse(a[0]).length || a[0].localeCompare(b[0]))[0]?.[0] ?? "[]";
+  const dominantSupport = sequenceCounts.get(dominantKey) ?? 0;
+  const hasDominantPattern = dominantSupport >= 2;
+  const dominantSequence = hasDominantPattern ? JSON.parse(dominantKey) : [];
+  Object.keys(sequenceByEntityId).forEach(entityId => {
+    const sequence = sequenceByEntityId[entityId].sequence ?? [];
+    const isCompared = compareSet.has(entityId);
+    const matchesDominant = hasDominantPattern && sequence.length > 0 && _sameSequence(sequence, dominantSequence);
+    sequenceByEntityId[entityId].followsDominant = matchesDominant;
+    sequenceByEntityId[entityId].dominanceState = !isCompared || !sequence.length
+      ? "neutral"
+      : matchesDominant
+        ? "dominant"
+        : hasDominantPattern
+          ? "deviant"
+          : "neutral";
+  });
+
+  return {
+    dominantSequence,
+    dominantSupport,
+    comparedSequenceCount,
+    hasDominantPattern,
+    sequenceByEntityId,
+    compareSet,
+  };
+}
+
+function _annotateBottlenecks(bands, eventById) {
+  const edges = bands.flatMap(band => band.lanes.flatMap(lane => lane.dfEdges)).filter(edge => Number.isFinite(edge.gapHours));
+  const threshold = _quantile(edges.map(edge => edge.gapHours), 0.75);
+  bands.forEach(band => {
+    band.lanes.forEach(lane => {
+      lane.dfEdges = lane.dfEdges.map(edge => ({
+        ...edge,
+        isBottleneck: Number.isFinite(threshold) && edge.gapHours > threshold,
+        sourceActivity: eventById[edge.source_event_id]?.activity ?? edge.source_event_id,
+        targetActivity: eventById[edge.target_event_id]?.activity ?? edge.target_event_id,
+      }));
+    });
+  });
+  return threshold;
+}
+
+function _summarizeDetailGraph(bands, eventAnchors, relations, anchorEntity, compareEntityIds, bottleneckThresholdHours) {
+  const sharedEvents = eventAnchors.filter(anchor => anchor.sharedEntityIds.length > 1);
+  const anchorBand = bands.find(band => band.entityType === anchorEntity.primary_type);
+  const topBottlenecks = bands
+    .flatMap(band => band.lanes.flatMap(lane => lane.dfEdges.map(edge => ({ ...edge, entityType: band.entityType, entityId: lane.entity_id }))))
+    .filter(edge => edge.isBottleneck)
+    .sort((a, b) => b.gapHours - a.gapHours)
+    .slice(0, 5);
+
+  return {
+    anchorEntityId: anchorEntity.entity_id,
+    anchorEntityType: anchorEntity.primary_type,
+    visibleEntityTypeCount: bands.length,
+    visibleEntityCount: bands.reduce((sum, band) => sum + band.lanes.length, 0),
+    eventCount: eventAnchors.length,
+    relationCount: relations.length,
+    sharedEventCount: sharedEvents.length,
+    compareEntityCount: compareEntityIds.length,
+    dominantFlow: anchorBand?.hasDominantPattern ? (anchorBand?.dominantSequence ?? []) : [],
+    hasDominantPattern: anchorBand?.hasDominantPattern ?? false,
+    dominantSupport: anchorBand?.dominantSupport ?? 0,
+    comparedSequenceCount: anchorBand?.comparedSequenceCount ?? 0,
+    deviationCount: anchorBand?.hasDominantPattern
+      ? (anchorBand?.lanes.filter(lane => lane.isCompared && lane.dominanceState === "deviant").length ?? 0)
+      : 0,
+    parallelEntityTypes: bands
+      .filter(band => band.entityType !== anchorEntity.primary_type && band.lanes.some(lane => lane.eventCount > 0))
+      .map(band => ({ entityType: band.entityType, count: band.lanes.length })),
+    topBottlenecks,
+    sharedEventHotspots: sharedEvents
+      .sort((a, b) => b.sharedEntityIds.length - a.sharedEntityIds.length || _compareEvents(a, b))
+      .slice(0, 5)
+      .map(anchor => ({
+        event_id: anchor.event_id,
+        activity: anchor.activity,
+        entityCount: anchor.sharedEntityIds.length,
+        entityTypes: anchor.sharedEntityTypes,
+      })),
+    bottleneckThresholdHours,
+  };
+}
+
+function _collectItemSequences(filters = {}) {
+  const itemIds = (_store.entityIdsByType[_store.itemType] ?? []).filter(entityId => !filters.itemIds || filters.itemIds.has(entityId));
+  return itemIds.map(entityId => {
+    const events = _filterEvents(_store.eventsByItemId[entityId] ?? [], filters).sort(_compareEvents);
+    if (!events.length) return null;
+    const eventById = Object.fromEntries(events.map(event => [event.event_id, event]));
+    const dfEdges = (_store.dfByEntityId[entityId] ?? []).filter(edge => eventById[edge.source_event_id] && eventById[edge.target_event_id]);
+    const traced = _traceEntityPath(events, dfEdges, eventById);
+    const sequence = traced.eventIds.map(eventId => eventById[eventId]?.activity).filter(Boolean);
+    if (!_sequencePassesActivityFilter(sequence, filters.activities)) return null;
+    return { entityId, caseId: events[0]?.case_entity_id ?? null, sequence, eventIds: traced.eventIds };
+  }).filter(Boolean);
+}
 
 function _filterEvents(events, filters = {}) {
   const { activities = null, resource = null, dateFrom = null, dateTo = null } = filters;
   let out = events;
-  if (activities && activities.size > 0) out = out.filter(e => activities.has(e.activity));
+  if (activities && activities.size > 0) out = out.filter(event => activities.has(event.activity));
   else if (activities && activities.size === 0) out = [];
-  if (resource) out = out.filter(e => e.org_resource === resource);
-  if (dateFrom) { const from = new Date(dateFrom); out = out.filter(e => e.date >= from); }
-  if (dateTo) { const to = new Date(dateTo); out = out.filter(e => e.date <= to); }
+  if (resource) out = out.filter(event => event.resource_labels?.includes(resource) || event.org_resource === resource);
+  if (dateFrom) { const from = new Date(dateFrom); out = out.filter(event => event.date >= from); }
+  if (dateTo) { const to = new Date(dateTo); out = out.filter(event => event.date <= to); }
   return out;
 }
 
-function _buildPoSummaries(poList, eventsByPo, itemsByPo) {
+function _buildCaseSummaries(caseList, eventsByCaseId, itemIdsByCaseId) {
   const summaries = {};
-  poList.forEach(po => {
-    const events = [...(eventsByPo[po.id] ?? [])].sort((a, b) => a.date - b.date);
-    const attrs = _pickAttrs(events[0], PO_ATTR_KEYS);
+  caseList.forEach(item => {
+    const events = [...(eventsByCaseId[item.id] ?? [])].sort(_compareEvents);
+    const attrs = _pickStableEntityAttrs(events[0], ["vendorName", "documentType", "Company", "Source"]);
     const displayAttrs = _pickStableContextAttrs(events);
-    const resources = [...new Set(events.map(e => e.org_resource).filter(_isMeaningfulResource))].sort();
-    const activityCounts = _countBy(events, e => e.activity);
+    const resources = [...new Set(events.flatMap(event => event.resource_labels ?? []).filter(_isMeaningfulResource))].sort((a, b) => a.localeCompare(b));
+    const activityCounts = _countBy(events, event => event.activity);
     const topActivities = Object.entries(activityCounts)
-      .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).slice(0, 3)
+      .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+      .slice(0, 3)
       .map(([activity, count]) => ({ activity, count }));
-    summaries[po.id] = {
-      id: po.id, attrs, displayAttrs, attrKeys: Object.keys(displayAttrs),
-      itemCount: itemsByPo[po.id]?.size ?? 0, eventCount: events.length,
-      firstDate: events[0]?.date ?? null, lastDate: events.at(-1)?.date ?? null,
+    summaries[item.id] = {
+      id: item.id,
+      attrs,
+      displayAttrs,
+      attrKeys: Object.keys(displayAttrs),
+      itemCount: itemIdsByCaseId[item.id]?.size ?? 0,
+      eventCount: events.length,
+      firstDate: events[0]?.date ?? null,
+      lastDate: events.at(-1)?.date ?? null,
       centerTime: _caseCenterTime(events[0]?.date ?? null, events.at(-1)?.date ?? null),
-      resources, resourceCount: resources.length, topResources: resources.slice(0, 3),
-      activityCounts, topActivities,
+      resources,
+      resourceCount: resources.length,
+      topResources: resources.slice(0, 3),
+      activityCounts,
+      topActivities,
       contextTokens: Object.entries(displayAttrs).map(([k, v]) => `${k}:${v}`),
-      overviewDisplayAttrs: displayAttrs, overviewAttrKeys: Object.keys(displayAttrs),
-      overviewResources: resources, overviewResourceCount: resources.length,
+      overviewDisplayAttrs: displayAttrs,
+      overviewAttrKeys: Object.keys(displayAttrs),
+      overviewResources: resources,
+      overviewResourceCount: resources.length,
       overviewTopResources: resources.slice(0, 3),
       overviewContextTokens: Object.entries(displayAttrs).map(([k, v]) => `${k}:${v}`),
     };
@@ -472,17 +1225,17 @@ function _buildPoSummaries(poList, eventsByPo, itemsByPo) {
   return summaries;
 }
 
-function _applyOverviewFeatureSelection(poSummaryById) {
-  const summaries = Object.values(poSummaryById ?? {});
+function _applyOverviewFeatureSelection(caseSummaryById) {
+  const summaries = Object.values(caseSummaryById ?? {});
   const caseCount = summaries.length;
   if (!caseCount) return;
-  const resourceCaseFreq = _countDocumentFrequency(summaries.map(s => s.resources));
-  const contextCaseFreq = _countDocumentFrequency(summaries.map(s => s.contextTokens));
+  const resourceCaseFreq = _countDocumentFrequency(summaries.map(summary => summary.resources));
+  const contextCaseFreq = _countDocumentFrequency(summaries.map(summary => summary.contextTokens));
   summaries.forEach(summary => {
-    const overviewResources = summary.resources.filter(r => _isInformativeOverviewValue(r, resourceCaseFreq[r] ?? 0, caseCount));
-    const overviewContextTokens = summary.contextTokens.filter(t => _isInformativeOverviewToken(t, contextCaseFreq[t] ?? 0, caseCount));
+    const overviewResources = summary.resources.filter(resource => _isInformativeOverviewValue(resource, resourceCaseFreq[resource] ?? 0, caseCount));
+    const overviewContextTokens = summary.contextTokens.filter(token => _isInformativeOverviewToken(token, contextCaseFreq[token] ?? 0, caseCount));
     const overviewDisplayAttrs = Object.fromEntries(
-      Object.entries(summary.displayAttrs ?? {}).filter(([k, v]) => overviewContextTokens.includes(`${k}:${v}`))
+      Object.entries(summary.displayAttrs ?? {}).filter(([key, value]) => overviewContextTokens.includes(`${key}:${value}`))
     );
     summary.overviewResources = overviewResources;
     summary.overviewResourceCount = overviewResources.length;
@@ -493,11 +1246,13 @@ function _applyOverviewFeatureSelection(poSummaryById) {
   });
 }
 
-function _buildOverviewRelations(poSummaryById) {
-  const summaries = Object.values(poSummaryById).sort((a, b) => a.id.localeCompare(b.id));
-  const datasetStart = Math.min(...summaries.map(s => s.firstDate?.getTime() ?? Infinity));
-  const datasetEnd = Math.max(...summaries.map(s => s.lastDate?.getTime() ?? -Infinity));
-  const timelineSpan = Number.isFinite(datasetStart) && Number.isFinite(datasetEnd) ? Math.max(datasetEnd - datasetStart, 1) : 1;
+function _buildOverviewRelations(caseSummaryById) {
+  const summaries = Object.values(caseSummaryById).sort((a, b) => a.id.localeCompare(b.id));
+  const datasetStart = Math.min(...summaries.map(summary => summary.firstDate?.getTime() ?? Infinity));
+  const datasetEnd = Math.max(...summaries.map(summary => summary.lastDate?.getTime() ?? -Infinity));
+  const timelineSpan = Number.isFinite(datasetStart) && Number.isFinite(datasetEnd)
+    ? Math.max(datasetEnd - datasetStart, 1)
+    : 1;
   const candidates = [];
 
   for (let i = 0; i < summaries.length; i++) {
@@ -520,17 +1275,17 @@ function _buildOverviewRelations(poSummaryById) {
 
   return candidates
     .filter(edge => {
-      const topS = (rankedByNode[edge.source] ?? []).slice(0, OVERVIEW_KNN);
-      const topT = (rankedByNode[edge.target] ?? []).slice(0, OVERVIEW_KNN);
-      return topS.includes(edge) || topT.includes(edge);
+      const topSource = (rankedByNode[edge.source] ?? []).slice(0, OVERVIEW_KNN);
+      const topTarget = (rankedByNode[edge.target] ?? []).slice(0, OVERVIEW_KNN);
+      return topSource.includes(edge) || topTarget.includes(edge);
     })
     .sort((a, b) => b.weight - a.weight || a.source.localeCompare(b.source) || a.target.localeCompare(b.target));
 }
 
-function _buildOverviewCommunities(poSummaryById, edges) {
-  const summaries = Object.values(poSummaryById);
+function _buildOverviewCommunities(caseSummaryById, edges) {
+  const summaries = Object.values(caseSummaryById);
   const adjacency = {};
-  const weightedDegreeById = Object.fromEntries(summaries.map(s => [s.id, 0]));
+  const weightedDegreeById = Object.fromEntries(summaries.map(summary => [summary.id, 0]));
   edges.forEach(edge => {
     if (!adjacency[edge.source]) adjacency[edge.source] = [];
     if (!adjacency[edge.target]) adjacency[edge.target] = [];
@@ -540,63 +1295,82 @@ function _buildOverviewCommunities(poSummaryById, edges) {
     weightedDegreeById[edge.target] += edge.weight;
   });
 
-  const labels = Object.fromEntries(summaries.map(s => [s.id, s.id]));
+  const labels = Object.fromEntries(summaries.map(summary => [summary.id, summary.id]));
   const order = [...summaries].sort((a, b) => (weightedDegreeById[b.id] ?? 0) - (weightedDegreeById[a.id] ?? 0) || a.id.localeCompare(b.id));
 
   for (let iter = 0; iter < 16; iter++) {
     let changed = false;
-    order.forEach(s => {
-      const neighbors = adjacency[s.id] ?? [];
+    order.forEach(summary => {
+      const neighbors = adjacency[summary.id] ?? [];
       if (!neighbors.length) return;
       const scores = {};
-      neighbors.forEach(n => { scores[labels[n.id]] = (scores[labels[n.id]] ?? 0) + n.weight; });
+      neighbors.forEach(neighbor => {
+        scores[labels[neighbor.id]] = (scores[labels[neighbor.id]] ?? 0) + neighbor.weight;
+      });
       const best = Object.entries(scores).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))[0]?.[0];
-      if (best && best !== labels[s.id]) { labels[s.id] = best; changed = true; }
+      if (best && best !== labels[summary.id]) {
+        labels[summary.id] = best;
+        changed = true;
+      }
     });
     if (!changed) break;
   }
 
-  const groups = Object.values(summaries.reduce((acc, s) => {
-    const label = labels[s.id];
+  const groups = Object.values(summaries.reduce((acc, summary) => {
+    const label = labels[summary.id];
     if (!acc[label]) acc[label] = { sourceLabel: label, nodeIds: [] };
-    acc[label].nodeIds.push(s.id);
+    acc[label].nodeIds.push(summary.id);
     return acc;
   }, {})).sort((a, b) => b.nodeIds.length - a.nodeIds.length || a.sourceLabel.localeCompare(b.sourceLabel));
 
   const communities = groups.map((group, index) => {
-    const members = group.nodeIds.map(id => poSummaryById[id]).filter(Boolean);
+    const members = group.nodeIds.map(id => caseSummaryById[id]).filter(Boolean);
     const activityTotals = {};
-    members.forEach(m => { Object.entries(m.activityCounts).forEach(([a, c]) => { activityTotals[a] = (activityTotals[a] ?? 0) + c; }); });
-    const hint = Object.entries(activityTotals).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
-      .slice(0, OVERVIEW_LABEL_ACTIVITY_COUNT).map(([a]) => a).join(" / ");
+    members.forEach(member => {
+      Object.entries(member.activityCounts).forEach(([activity, count]) => {
+        activityTotals[activity] = (activityTotals[activity] ?? 0) + count;
+      });
+    });
+    const hint = Object.entries(activityTotals)
+      .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+      .slice(0, OVERVIEW_LABEL_ACTIVITY_COUNT)
+      .map(([activity]) => activity)
+      .join(" / ");
     const code = `Community ${String(index + 1).padStart(2, "0")}`;
-    return { id: `community-${String(index + 1).padStart(2, "0")}`, code, label: hint || code, hint: hint ? code : "", nodeIds: group.nodeIds };
+    return {
+      id: `community-${String(index + 1).padStart(2, "0")}`,
+      code,
+      label: hint || code,
+      hint: hint ? code : "",
+      nodeIds: group.nodeIds,
+    };
   });
 
-  // Disambiguate duplicate labels with letter suffixes (A, B, C…)
   const labelFreq = {};
-  communities.forEach(c => { labelFreq[c.label] = (labelFreq[c.label] ?? 0) + 1; });
+  communities.forEach(community => { labelFreq[community.label] = (labelFreq[community.label] ?? 0) + 1; });
   const labelSeq = {};
-  communities.forEach(c => {
-    if ((labelFreq[c.label] ?? 1) > 1) {
-      labelSeq[c.label] = (labelSeq[c.label] ?? 0) + 1;
-      c.label = `${c.label} ${String.fromCharCode(64 + labelSeq[c.label])}`;
+  communities.forEach(community => {
+    if ((labelFreq[community.label] ?? 1) > 1) {
+      labelSeq[community.label] = (labelSeq[community.label] ?? 0) + 1;
+      community.label = `${community.label} ${String.fromCharCode(64 + labelSeq[community.label])}`;
     }
   });
 
-  const communityByPoId = {};
+  const communityByCaseId = {};
   communities.forEach(community => {
-    community.nodeIds.forEach(id => { communityByPoId[id] = { ...community, weightedDegree: weightedDegreeById[id] ?? 0 }; });
+    community.nodeIds.forEach(id => {
+      communityByCaseId[id] = { ...community, weightedDegree: weightedDegreeById[id] ?? 0 };
+    });
   });
 
-  return { communities, communityByPoId };
+  return { communities, communityByCaseId };
 }
 
-function _buildFilteredSummaries(poSummaryById, eventsByPo, activities) {
+function _buildFilteredSummaries(caseSummaryById, eventsByCaseId, activities) {
   const filtered = {};
-  Object.entries(poSummaryById).forEach(([id, summary]) => {
-    const evs = (eventsByPo[id] ?? []).filter(e => activities.has(e.activity));
-    filtered[id] = { ...summary, activityCounts: _countBy(evs, e => e.activity) };
+  Object.entries(caseSummaryById).forEach(([id, summary]) => {
+    const events = (eventsByCaseId[id] ?? []).filter(event => activities.has(event.activity));
+    filtered[id] = { ...summary, activityCounts: _countBy(events, event => event.activity) };
   });
   return filtered;
 }
@@ -612,68 +1386,90 @@ function _scoreOverviewPair(a, b, timelineSpan) {
   const reasons = [];
   if (actSim >= 0.25) reasons.push(`activity profile ${Math.round(actSim * 100)}% aligned`);
   if (resSim >= 0.2) reasons.push(_sharedValueReason("shared resources", a.overviewResources, b.overviewResources));
-  if (ctxSim >= 0.2) reasons.push(_sharedValueReason("shared context", a.overviewContextTokens, b.overviewContextTokens, t => t.replace(":", " = ")));
+  if (ctxSim >= 0.2) reasons.push(_sharedValueReason("shared context", a.overviewContextTokens, b.overviewContextTokens, token => token.replace(":", " = ")));
   if (timeSim >= 0.55) reasons.push("close in time");
   if (sizeSim >= 0.75) reasons.push("similar case size");
-  return { id: `${a.id}__${b.id}`, source: a.id, target: b.id, weight, reasons: reasons.slice(0, 3), components: { actSim, resSim, ctxSim, timeSim, sizeSim } };
+  return {
+    id: `${a.id}__${b.id}`,
+    source: a.id,
+    target: b.id,
+    weight,
+    reasons: reasons.slice(0, 3),
+    components: { actSim, resSim, ctxSim, timeSim, sizeSim },
+  };
 }
 
-function _collectItemSequences(filters = {}) {
-  const scopedItemIds = filters.itemIds ? new Set(filters.itemIds) : null;
-  const itemIds = [...new Set([...Object.keys(_store.eventsByItem ?? {}), ...Object.keys(_store.dfItemByEntity ?? {})])]
-    .filter(id => !scopedItemIds || scopedItemIds.has(id)).sort();
-  return itemIds.map(entityId => {
-    const events = [...(_store.eventsByItem[entityId] ?? [])].sort(_compareEvents);
-    if (!events.length) return null;
-    const evById = Object.fromEntries(events.map(e => [e.event_id, e]));
-    const edges = (_store.dfItemByEntity[entityId] ?? []).filter(edge => evById[edge.source] && evById[edge.target]);
-    const traced = _traceEntityPath(events, edges, evById);
-    const sequence = traced.eventIds.map(id => evById[id]?.activity).filter(Boolean);
-    if (!_sequencePassesActivityFilter(sequence, filters.activities)) return null;
-    return { entityId, poId: events[0]?.po_id ?? null, sequence, eventIds: traced.eventIds };
-  }).filter(entry => entry && entry.sequence.length > 0);
-}
-
-function _traceEntityPath(events, edges, evById) {
-  const predecessorIds = {}, successorIds = {};
-  const nodeIds = new Set(events.map(e => e.event_id ?? e.id));
+function _traceEntityPath(events, edges, eventById) {
+  const predecessorIds = {};
+  const successorIds = {};
+  const nodeIds = new Set(events.map(event => event.event_id ?? event.id));
   edges.forEach(edge => {
-    nodeIds.add(edge.source); nodeIds.add(edge.target);
-    if (!successorIds[edge.source]) successorIds[edge.source] = [];
-    if (!predecessorIds[edge.target]) predecessorIds[edge.target] = [];
-    successorIds[edge.source].push(edge.target);
-    predecessorIds[edge.target].push(edge.source);
+    nodeIds.add(edge.source_event_id ?? edge.source);
+    nodeIds.add(edge.target_event_id ?? edge.target);
+    const sourceId = edge.source_event_id ?? edge.source;
+    const targetId = edge.target_event_id ?? edge.target;
+    if (!successorIds[sourceId]) successorIds[sourceId] = [];
+    if (!predecessorIds[targetId]) predecessorIds[targetId] = [];
+    successorIds[sourceId].push(targetId);
+    predecessorIds[targetId].push(sourceId);
   });
-  const nodes = [...nodeIds].filter(id => evById[id]).sort(_compareEventIds(evById));
+
+  const nodes = [...nodeIds].filter(id => eventById[id]).sort(_compareEventIds(eventById));
   const starts = nodes.filter(id => (predecessorIds[id] ?? []).length === 0);
-  const orderedStarts = (starts.length ? starts : nodes).sort(_compareEventIds(evById));
-  const visited = new Set(), orderedEventIds = [], queue = [...orderedStarts];
+  const orderedStarts = (starts.length ? starts : nodes).sort(_compareEventIds(eventById));
+  const visited = new Set();
+  const orderedEventIds = [];
+  const queue = [...orderedStarts];
+
   while (queue.length) {
-    let cur = queue.shift();
-    while (cur && !visited.has(cur)) {
-      orderedEventIds.push(cur); visited.add(cur);
-      const nextIds = [...new Set(successorIds[cur] ?? [])].filter(id => !visited.has(id)).sort(_compareEventIds(evById));
-      if (nextIds.length <= 1) { cur = nextIds[0] ?? null; continue; }
-      queue.unshift(...nextIds.slice(1)); cur = nextIds[0];
+    let current = queue.shift();
+    while (current && !visited.has(current)) {
+      orderedEventIds.push(current);
+      visited.add(current);
+      const nextIds = [...new Set(successorIds[current] ?? [])]
+        .filter(id => !visited.has(id))
+        .sort(_compareEventIds(eventById));
+      if (nextIds.length <= 1) {
+        current = nextIds[0] ?? null;
+        continue;
+      }
+      queue.unshift(...nextIds.slice(1));
+      current = nextIds[0];
     }
   }
-  nodes.forEach(id => { if (!visited.has(id)) orderedEventIds.push(id); });
+
+  nodes.forEach(id => {
+    if (!visited.has(id)) orderedEventIds.push(id);
+  });
+
   return { eventIds: orderedEventIds };
 }
 
 function _sequencePassesActivityFilter(sequence, activities) {
   if (!activities) return true;
-  return (sequence ?? []).every(a => activities.has(a));
+  return (sequence ?? []).every(activity => activities.has(activity));
 }
 
-function _compareEvents(a, b) {
-  return (a?.date?.getTime?.() ?? 0) - (b?.date?.getTime?.() ?? 0) || String(a?.event_id ?? a?.id ?? "").localeCompare(String(b?.event_id ?? b?.id ?? ""));
+function _entityLabel(entity) {
+  if (!entity) return "";
+  return entity.properties?.title
+    || entity.properties?.vendorName
+    || entity.properties?.name
+    || entity.properties?.sysId
+    || entity.entity_id;
 }
-function _compareEventIds(evById) { return (a, b) => _compareEvents(evById[a], evById[b]); }
 
-function _pickAttrs(obj, keys) {
-  if (!obj) return {};
-  return Object.fromEntries(keys.filter(k => obj[k] !== undefined && obj[k] !== null && obj[k] !== "").map(k => [k, obj[k]]));
+function _labelizeType(type) {
+  return String(type ?? "").replaceAll("_", " ");
+}
+
+function _pickStableEntityAttrs(entityLike, keys) {
+  if (!entityLike) return {};
+  return Object.fromEntries(
+    keys
+      .filter(key => entityLike[key] !== undefined && entityLike[key] !== null && entityLike[key] !== "")
+      .map(key => [key, entityLike[key]])
+  );
 }
 
 function _pickStableContextAttrs(events) {
@@ -681,8 +1477,8 @@ function _pickStableContextAttrs(events) {
   const keys = Object.keys(events[0]).filter(_isStableContextKey);
   const stable = [];
   keys.forEach(key => {
-    const vals = [...new Set(events.map(e => e[key]).filter(v => v !== undefined && v !== null && v !== ""))];
-    if (vals.length === 1) stable.push([key, vals[0]]);
+    const values = [...new Set(events.map(event => event[key]).filter(value => value !== undefined && value !== null && value !== ""))];
+    if (values.length === 1) stable.push([key, values[0]]);
   });
   stable.sort((a, b) => String(a[1]).length - String(b[1]).length || a[0].localeCompare(b[0]));
   return Object.fromEntries(stable);
@@ -690,125 +1486,222 @@ function _pickStableContextAttrs(events) {
 
 function _isStableContextKey(key) {
   if (!key) return false;
-  const n = key.toLowerCase();
-  return !["activity", "timestamp", "date", "org_resource", "resourcecolor", "activitycolor",
-           "lifecycle_transition", "po_id", "poitem_id", "event_id", "id"].includes(n) && !n.endsWith("_id");
+  const normalized = key.toLowerCase();
+  return ![
+    "activity", "timestamp", "date", "memberships", "entity_ids", "entity_ids_by_type",
+    "resource_labels", "resource_entity_ids", "primary_resource_label", "case_entity_id",
+    "item_entity_id", "event_id", "id", "activitycolor", "resourcecolor",
+  ].includes(normalized) && !normalized.endsWith("_id");
 }
 
 function _isMeaningfulResource(value) {
   if (value === undefined || value === null) return false;
-  const n = String(value).trim();
-  return n !== "" && n.toUpperCase() !== "NONE";
+  const normalized = String(value).trim();
+  return normalized !== "" && normalized.toUpperCase() !== "NONE";
 }
 
 function _isInformativeOverviewToken(token, freq, caseCount) {
   const [, rawValue = token] = String(token ?? "").split(/:(.+)/, 2);
   return _isInformativeOverviewValue(rawValue, freq, caseCount);
 }
+
 function _isInformativeOverviewValue(value, freq, caseCount) {
   if (!_isMeaningfulOverviewValue(value)) return false;
   return caseCount > 0 ? freq / caseCount < OVERVIEW_MAX_COMMON_SHARE : false;
 }
+
 function _isMeaningfulOverviewValue(value) {
   if (value === undefined || value === null) return false;
-  const n = String(value).trim();
-  if (!n) return false;
-  const lower = n.toLowerCase();
+  const normalized = String(value).trim();
+  if (!normalized) return false;
+  const lower = normalized.toLowerCase();
   if (["none", "unknown", "n/a", "na", "null"].includes(lower)) return false;
-  if (/^[a-z][a-z0-9]*_0+$/i.test(n) || /^[a-z][a-z0-9]*id_0+$/i.test(n) || /^0+$/.test(n)) return false;
+  if (/^[a-z][a-z0-9]*_0+$/i.test(normalized) || /^[a-z][a-z0-9]*id_0+$/i.test(normalized) || /^0+$/.test(normalized)) return false;
   return true;
 }
 
 function _countDocumentFrequency(valueLists) {
   const counts = {};
-  (valueLists ?? []).forEach(vals => { [...new Set(vals ?? [])].forEach(v => { counts[v] = (counts[v] ?? 0) + 1; }); });
+  (valueLists ?? []).forEach(values => {
+    [...new Set(values ?? [])].forEach(value => {
+      counts[value] = (counts[value] ?? 0) + 1;
+    });
+  });
   return counts;
 }
+
 function _countBy(items, getKey) {
-  return items.reduce((acc, item) => { const k = getKey(item); if (!k) return acc; acc[k] = (acc[k] ?? 0) + 1; return acc; }, {});
+  return items.reduce((acc, item) => {
+    const key = getKey(item);
+    if (!key) return acc;
+    acc[key] = (acc[key] ?? 0) + 1;
+    return acc;
+  }, {});
 }
+
 function _caseCenterTime(first, last) {
   if (!first && !last) return null;
   if (!first) return last.getTime();
   if (!last) return first.getTime();
   return (first.getTime() + last.getTime()) / 2;
 }
+
 function _cosineSimilarity(aCounts, bCounts) {
   const keys = new Set([...Object.keys(aCounts ?? {}), ...Object.keys(bCounts ?? {})]);
   if (!keys.size) return 0;
-  let dot = 0, magA = 0, magB = 0;
-  keys.forEach(k => { const a = aCounts?.[k] ?? 0, b = bCounts?.[k] ?? 0; dot += a * b; magA += a * a; magB += b * b; });
+  let dot = 0;
+  let magA = 0;
+  let magB = 0;
+  keys.forEach(key => {
+    const a = aCounts?.[key] ?? 0;
+    const b = bCounts?.[key] ?? 0;
+    dot += a * b;
+    magA += a * a;
+    magB += b * b;
+  });
   if (magA === 0 || magB === 0) return 0;
   return dot / (Math.sqrt(magA) * Math.sqrt(magB));
 }
+
 function _jaccardSimilarity(aVals, bVals) {
-  const a = new Set(aVals ?? []), b = new Set(bVals ?? []);
+  const a = new Set(aVals ?? []);
+  const b = new Set(bVals ?? []);
   if (!a.size && !b.size) return 0;
   let inter = 0;
-  a.forEach(v => { if (b.has(v)) inter++; });
+  a.forEach(value => { if (b.has(value)) inter++; });
   return inter / new Set([...a, ...b]).size;
 }
+
 function _temporalSimilarity(aCenter, bCenter, span) {
   if (!Number.isFinite(aCenter) || !Number.isFinite(bCenter)) return 0;
   return Math.max(0, 1 - (Math.abs(aCenter - bCenter) / Math.max(span, 1)));
 }
+
 function _sizeSimilarity(a, b) {
   return _ratioSimilarity(a.eventCount, b.eventCount) * 0.7 + _ratioSimilarity(a.itemCount, b.itemCount) * 0.3;
 }
+
 function _ratioSimilarity(a, b) {
   if (!a && !b) return 1;
   return 1 - (Math.abs((a ?? 0) - (b ?? 0)) / Math.max(a ?? 0, b ?? 0, 1));
 }
-function _sharedValueReason(label, aVals, bVals, fmt = v => v) {
+
+function _sharedValueReason(label, aVals, bVals, fmt = value => value) {
   const bSet = new Set(bVals ?? []);
-  const shared = [...new Set(aVals ?? [])].filter(v => bSet.has(v));
+  const shared = [...new Set(aVals ?? [])].filter(value => bSet.has(value));
   if (!shared.length) return label;
   const preview = shared.slice(0, 2).map(fmt).join(", ");
   return shared.length > 2 ? `${label}: ${preview}, ...` : `${label}: ${preview}`;
 }
+
 function _aggregateCommunityResources(nodes) {
   const counts = {};
-  nodes.forEach(n => { (n.resources ?? []).forEach(r => { counts[r] = (counts[r] ?? 0) + 1; }); });
-  return Object.entries(counts).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
-    .map(([r, count]) => ({ id: `resource:${r}`, type: "resource", label: r, shortLabel: _shortToken(r, 12), count }));
+  nodes.forEach(node => {
+    (node.resources ?? []).forEach(resource => {
+      counts[resource] = (counts[resource] ?? 0) + 1;
+    });
+  });
+  return Object.entries(counts)
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .map(([resource, count]) => ({
+      id: `resource:${resource}`,
+      type: "resource",
+      label: resource,
+      shortLabel: _shortToken(resource, 12),
+      count,
+    }));
 }
+
 function _aggregateCommunityAttrs(nodes) {
   const counts = {};
-  nodes.forEach(n => {
-    Object.entries(n.displayAttrs ?? {}).forEach(([k, v]) => {
-      const token = `${k}:${v}`;
-      if (!counts[token]) counts[token] = { id: `attr:${token}`, type: "attribute", key: k, value: v, label: `${_labelizeKey(k)}=${v}`, shortLabel: `${_labelizeKey(k)}=${_shortToken(v, 14)}`, count: 0 };
+  nodes.forEach(node => {
+    Object.entries(node.displayAttrs ?? {}).forEach(([key, value]) => {
+      const token = `${key}:${value}`;
+      if (!counts[token]) {
+        counts[token] = {
+          id: `attr:${token}`,
+          type: "attribute",
+          key,
+          value,
+          label: `${_labelizeKey(key)}=${value}`,
+          shortLabel: `${_labelizeKey(key)}=${_shortToken(value, 14)}`,
+          count: 0,
+        };
+      }
       counts[token].count += 1;
     });
   });
   return Object.values(counts).sort((a, b) => b.count - a.count || a.key.localeCompare(b.key));
 }
+
 function _buildCommunityEdges(edges, nodes) {
-  const communityByNode = Object.fromEntries(nodes.map(n => [n.id, n.clusterKey]));
+  const communityByNode = Object.fromEntries(nodes.map(node => [node.id, node.clusterKey]));
   const map = new Map();
   edges.forEach(edge => {
-    const sc = communityByNode[edge.source], tc = communityByNode[edge.target];
-    if (!sc || !tc || sc === tc) return;
-    const [src, tgt] = sc < tc ? [sc, tc] : [tc, sc];
-    const key = `${src}__${tgt}`;
-    if (!map.has(key)) map.set(key, { id: key, source: src, target: tgt, weight: 0, count: 0 });
-    const agg = map.get(key); agg.weight += edge.weight; agg.count += 1;
+    const sourceCommunity = communityByNode[edge.source];
+    const targetCommunity = communityByNode[edge.target];
+    if (!sourceCommunity || !targetCommunity || sourceCommunity === targetCommunity) return;
+    const [source, target] = sourceCommunity < targetCommunity
+      ? [sourceCommunity, targetCommunity]
+      : [targetCommunity, sourceCommunity];
+    const key = `${source}__${target}`;
+    if (!map.has(key)) map.set(key, { id: key, source, target, weight: 0, count: 0 });
+    const agg = map.get(key);
+    agg.weight += edge.weight;
+    agg.count += 1;
   });
   return [...map.values()].sort((a, b) => b.weight - a.weight || a.source.localeCompare(b.source));
 }
+
 function _buildColorMap(values, palette, fallback = null) {
   const map = {};
-  values.forEach((v, i) => { map[v] = palette[i] ?? fallback ?? _hashColor(v); });
+  values.forEach((value, index) => {
+    map[value] = palette[index] ?? fallback ?? _hashColor(value);
+  });
   return map;
 }
+
 function _hashColor(value) {
   let hash = 0;
   const text = String(value ?? "");
   for (let i = 0; i < text.length; i++) hash = ((hash << 5) - hash) + text.charCodeAt(i);
   return `hsl(${Math.abs(hash) % 360} 62% 46%)`;
 }
-function _labelizeKey(key) { return String(key ?? "").replaceAll("_", " "); }
+
+function _labelizeKey(key) {
+  return String(key ?? "").replaceAll("_", " ");
+}
+
 function _shortToken(value, maxChars = 14) {
   const text = String(value ?? "");
   return text.length > maxChars ? `${text.slice(0, maxChars - 3)}...` : text;
+}
+
+function _compareEvents(a, b) {
+  return (a?.date?.getTime?.() ?? 0) - (b?.date?.getTime?.() ?? 0)
+    || String(a?.event_id ?? a?.id ?? "").localeCompare(String(b?.event_id ?? b?.id ?? ""));
+}
+
+function _compareEventIds(eventById) {
+  return (a, b) => _compareEvents(eventById[a], eventById[b]);
+}
+
+function _hoursBetween(a, b) {
+  if (!(a instanceof Date) || Number.isNaN(a.getTime()) || !(b instanceof Date) || Number.isNaN(b.getTime())) return 0;
+  return Math.max((b.getTime() - a.getTime()) / (1000 * 60 * 60), 0);
+}
+
+function _quantile(values, q) {
+  const sorted = [...(values ?? [])].filter(Number.isFinite).sort((a, b) => a - b);
+  if (!sorted.length) return NaN;
+  if (sorted.length === 1) return sorted[0];
+  const idx = (sorted.length - 1) * q;
+  const lo = Math.floor(idx);
+  const hi = Math.ceil(idx);
+  if (lo === hi) return sorted[lo];
+  return sorted[lo] * (1 - (idx - lo)) + sorted[hi] * (idx - lo);
+}
+
+function _sameSequence(a, b) {
+  return JSON.stringify(a ?? []) === JSON.stringify(b ?? []);
 }

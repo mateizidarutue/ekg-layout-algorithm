@@ -1,5 +1,5 @@
 """
-Export Neo4j EKG to the JSON schema defined in docs/PIPELINE.md.
+Export Neo4j EKG to a typed JSON bundle consumed by the viewer.
 
 Usage:
     python -m pipeline.export_json --dataset library --output output/library.json
@@ -12,10 +12,9 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from pipeline.config_loader import load_config, get_dataset_config
+from pipeline.config_loader import get_dataset_config, load_config
 
-CORE_EVENT_PROPS = {"activity", "timestamp", "event_id"}
-CORE_ENTITY_PROPS = {"entity_id", "entity_type"}
+GENERIC_ENTITY_LABELS = {"Entity", "Resource", "EntityAttribute"}
 
 
 def _load_cypher(name: str) -> str:
@@ -23,15 +22,21 @@ def _load_cypher(name: str) -> str:
     return (cypher_dir / f"{name}.cypher").read_text()
 
 
-def _strip_core(props: dict, core_keys: set) -> dict:
-    return {k: v for k, v in (props or {}).items() if k not in core_keys}
+def _stringify_props(props: dict) -> dict:
+    return {
+        str(k): ("" if v is None else str(v))
+        for k, v in (props or {}).items()
+    }
 
 
-def _infer_entity_type(node_labels: list) -> str:
-    """Extract entity type from PromG secondary labels (e.g. ['Entity','PO'] -> 'PO')."""
-    for label in node_labels:
-        if label != "Entity":
-            return label
+def _infer_primary_type(node_labels: list[str]) -> str:
+    labels = [label for label in (node_labels or []) if label]
+    specific = sorted(label for label in labels if label not in GENERIC_ENTITY_LABELS)
+    if specific:
+        return specific[0]
+    generic = sorted(label for label in labels if label != "Entity")
+    if generic:
+        return generic[0]
     return "Entity"
 
 
@@ -39,9 +44,19 @@ def _to_iso(value) -> str:
     if value is None:
         return ""
     if hasattr(value, "iso_format"):
-        # neo4j.time.DateTime
         return value.iso_format()
     return str(value)
+
+
+def _resolve_event_id(row: dict, props: dict) -> tuple[str, str]:
+    neo_id = str(row["event_id"])
+    explicit_id = props.get("event_id") or props.get("ID")
+    return neo_id, str(explicit_id) if explicit_id is not None else neo_id
+
+
+def _validate_unique_ids(values: list[str], label: str, errors: list[str]) -> None:
+    if len(set(values)) != len(values):
+        errors.append(f"Duplicate {label} values found")
 
 
 def run(dataset_name: str, output_path: str) -> None:
@@ -65,125 +80,137 @@ def run(dataset_name: str, output_path: str) -> None:
 
     try:
         driver.verify_connectivity()
-    except Exception as e:
-        print(f"ERROR: Cannot connect to Neo4j: {e}", file=sys.stderr)
+    except Exception as exc:
+        print(f"ERROR: Cannot connect to Neo4j: {exc}", file=sys.stderr)
         sys.exit(1)
 
     t0 = time.time()
 
     with driver.session(database=database) as session:
-
-        # ── Events ────────────────────────────────────────────────────────────
         print("Exporting events...")
-        event_q = _load_cypher("events")
-        events_raw = session.run(event_q).data()
+        event_rows = session.run(_load_cypher("events")).data()
         events = []
-        event_id_map = {}  # neo4j internal id -> string event_id
-
-        for row in events_raw:
-            neo_id = row["event_id"]
+        event_id_map = {}
+        for row in event_rows:
             props = dict(row.get("props") or {})
-
-            # Prefer explicit event_id/ID property; fall back to neo4j internal id
-            explicit_id = props.pop("event_id", None) or props.pop("ID", None)
-            event_id_str = str(explicit_id) if explicit_id is not None else str(neo_id)
-            event_id_map[neo_id] = event_id_str
-
-            activity = row.get("activity") or props.pop("activity", props.pop("Activity", ""))
-            timestamp = row.get("timestamp") or _to_iso(props.pop("timestamp", props.pop("start_time", "")))
-
-            # Remove fields already promoted to top level
-            for key in ("activity", "Activity", "timestamp", "start_time"):
-                props.pop(key, None)
-
+            neo_id, event_id = _resolve_event_id(row, props)
+            event_id_map[neo_id] = event_id
+            activity = row.get("activity") or props.get("activity") or props.get("Activity") or ""
+            timestamp = row.get("timestamp") or props.get("timestamp") or props.get("start_time") or ""
             events.append({
-                "event_id": event_id_str,
-                "activity": str(activity or ""),
-                "timestamp": str(timestamp or ""),
-                "properties": {k: str(v) if v is not None else "" for k, v in props.items()},
+                "event_id": event_id,
+                "activity": str(activity),
+                "timestamp": _to_iso(timestamp),
+                "properties": _stringify_props(props),
             })
 
-        # ── Entities ──────────────────────────────────────────────────────────
         print("Exporting entities...")
-        entity_q = _load_cypher("entities")
-        entities_raw = session.run(entity_q).data()
+        entity_rows = session.run(_load_cypher("entities")).data()
         entities = []
-        entity_id_set = set()
-
-        for row in entities_raw:
+        entity_by_id = {}
+        for row in entity_rows:
             props = dict(row.get("props") or {})
-            explicit_id = props.pop("ID", None) or props.pop("entity_id", None)
-            entity_id_str = str(explicit_id) if explicit_id is not None else str(row["entity_id"])
-            entity_type = _infer_entity_type(row.get("node_labels") or [])
-
-            for key in ("ID", "entity_id", "EntityType"):
-                props.pop(key, None)
-
-            if entity_id_str in entity_id_set:
+            entity_id = str(row["entity_id"])
+            labels = sorted(label for label in (row.get("node_labels") or []) if label and label != "Entity")
+            primary_type = _infer_primary_type(row.get("node_labels") or [])
+            entity = {
+                "entity_id": entity_id,
+                "entity_type": primary_type,
+                "primary_type": primary_type,
+                "labels": labels,
+                "properties": _stringify_props(props),
+            }
+            if entity_id in entity_by_id:
                 continue
-            entity_id_set.add(entity_id_str)
+            entity_by_id[entity_id] = entity
+            entities.append(entity)
 
-            entities.append({
-                "entity_id": entity_id_str,
-                "entity_type": entity_type,
-                "properties": {k: str(v) if v is not None else "" for k, v in props.items()},
+        print("Exporting corr edges...")
+        corr_rows = session.run(_load_cypher("corr")).data()
+        corr = []
+        for row in corr_rows:
+            event_id = event_id_map.get(str(row["event_id"]), str(row["event_id"]))
+            entity_id = str(row["entity_id"])
+            if entity_id not in entity_by_id:
+                continue
+            corr.append({
+                "event_id": event_id,
+                "entity_id": entity_id,
+                "relation_type": str(row.get("relation_type") or "CORR"),
             })
 
-        # ── CORR ──────────────────────────────────────────────────────────────
-        print("Exporting corr edges...")
-        corr_q = _load_cypher("corr")
-        corr_raw = session.run(corr_q).data()
-        corr = []
-        for row in corr_raw:
-            # event_id in corr query is neo4j id; map to string event_id
-            neo_ev_id = row["event_id"]
-            ev_id_str = event_id_map.get(neo_ev_id, str(neo_ev_id))
-            en_id_str = str(row["entity_id"])
-            corr.append({"event_id": ev_id_str, "entity_id": en_id_str})
-
-        # ── DF ────────────────────────────────────────────────────────────────
         print("Exporting df edges...")
-        df_q = _load_cypher("df")
-        df_raw = session.run(df_q).data()
+        df_rows = session.run(_load_cypher("df")).data()
         df = []
-        for row in df_raw:
-            src_neo = row["source_event_id"]
-            tgt_neo = row["target_event_id"]
+        for row in df_rows:
             df.append({
-                "source_event_id": event_id_map.get(src_neo, str(src_neo)),
-                "target_event_id": event_id_map.get(tgt_neo, str(tgt_neo)),
-                "entity_id": str(row["entity_id"] or ""),
-                "entity_type": str(row["entity_type"] or ""),
+                "source_event_id": event_id_map.get(str(row["source_event_id"]), str(row["source_event_id"])),
+                "target_event_id": event_id_map.get(str(row["target_event_id"]), str(row["target_event_id"])),
+                "entity_id": str(row.get("entity_id") or "").strip(),
+                "entity_type": str(row.get("entity_type") or "").strip(),
+            })
+
+        print("Exporting structural relations...")
+        relation_rows = session.run(_load_cypher("relations")).data()
+        relations = []
+        for row in relation_rows:
+            source_id = str(row["source_id"])
+            target_id = str(row["target_id"])
+            if source_id not in entity_by_id or target_id not in entity_by_id:
+                continue
+            relations.append({
+                "source_entity_id": source_id,
+                "target_entity_id": target_id,
+                "source_entity_type": entity_by_id[source_id]["primary_type"],
+                "target_entity_type": entity_by_id[target_id]["primary_type"],
+                "relation_type": str(row.get("relation_type") or ""),
+                "properties": _stringify_props(row.get("props") or {}),
             })
 
     driver.close()
 
-    # ── Validate schema invariants ────────────────────────────────────────────
     print("Validating...")
-    event_ids = {e["event_id"] for e in events}
-    entity_ids = {e["entity_id"] for e in entities}
     errors = []
+    event_ids = [event["event_id"] for event in events]
+    entity_ids = [entity["entity_id"] for entity in entities]
+    _validate_unique_ids(event_ids, "event_id", errors)
+    _validate_unique_ids(entity_ids, "entity_id", errors)
 
-    if len(event_ids) != len(events):
-        errors.append("Duplicate event_id values found")
-    if len(entity_ids) != len(entities):
-        errors.append("Duplicate entity_id values found")
+    event_id_set = set(event_ids)
+    entity_id_set = set(entity_ids)
 
-    bad_corr = [c for c in corr if c["event_id"] not in event_ids or c["entity_id"] not in entity_ids]
+    bad_corr = [
+        edge for edge in corr
+        if edge["event_id"] not in event_id_set or edge["entity_id"] not in entity_id_set
+    ]
     if bad_corr:
         errors.append(f"{len(bad_corr)} corr edges have unknown event_id or entity_id")
 
-    bad_df = [d for d in df if d["source_event_id"] not in event_ids or d["target_event_id"] not in event_ids]
+    bad_df = [
+        edge for edge in df
+        if edge["source_event_id"] not in event_id_set
+        or edge["target_event_id"] not in event_id_set
+        or edge["entity_id"] not in entity_id_set
+        or edge["entity_id"] == ""
+    ]
     if bad_df:
-        errors.append(f"{len(bad_df)} df edges have unknown source or target event_id")
+        errors.append(
+            f"{len(bad_df)} df edges have missing/unknown source_event_id, target_event_id, or entity_id"
+        )
+
+    bad_rel = [
+        edge for edge in relations
+        if edge["source_entity_id"] not in entity_id_set or edge["target_entity_id"] not in entity_id_set
+    ]
+    if bad_rel:
+        errors.append(f"{len(bad_rel)} relations reference unknown entity_id values")
 
     if errors:
         print("VALIDATION ERRORS:", file=sys.stderr)
         for err in errors:
             print(f"  - {err}", file=sys.stderr)
-        print("Output written anyway; fix Cypher templates if IDs are wrong.", file=sys.stderr)
+        sys.exit(1)
 
-    # ── Assemble and write ────────────────────────────────────────────────────
     bundle = {
         "dataset": dataset_name,
         "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -193,30 +220,31 @@ def run(dataset_name: str, output_path: str) -> None:
             "entities": len(entities),
             "corr": len(corr),
             "df": len(df),
+            "relations": len(relations),
         },
         "events": events,
         "entities": entities,
         "corr": corr,
         "df": df,
+        "relations": relations,
     }
 
     out_path = Path(output_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(out_path, "w", encoding="utf-8") as f:
-        json.dump(bundle, f, ensure_ascii=False)
+    with open(out_path, "w", encoding="utf-8") as handle:
+        json.dump(bundle, handle, ensure_ascii=False)
 
     elapsed = time.time() - t0
-    print(f"\nExport complete in {elapsed:.1f}s → {out_path}")
-    print(f"  events:   {len(events):,}")
-    print(f"  entities: {len(entities):,}")
-    print(f"  corr:     {len(corr):,}")
-    print(f"  df:       {len(df):,}")
-    if errors:
-        print(f"  WARNINGS: {len(errors)} validation issue(s) — see above")
+    print(f"\nExport complete in {elapsed:.1f}s -> {out_path}")
+    print(f"  events:    {len(events):,}")
+    print(f"  entities:  {len(entities):,}")
+    print(f"  corr:      {len(corr):,}")
+    print(f"  df:        {len(df):,}")
+    print(f"  relations: {len(relations):,}")
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Export Neo4j EKG to JSON")
+    parser = argparse.ArgumentParser(description="Export Neo4j EKG to typed JSON")
     parser.add_argument("--dataset", required=True, help="Dataset name from config.yaml")
     parser.add_argument("--output", required=True, help="Output JSON path")
     args = parser.parse_args()

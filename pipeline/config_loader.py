@@ -30,7 +30,7 @@ def get_dataset_config(config: dict, dataset_name: str) -> dict:
         )
     ds = datasets[dataset_name]
 
-    required = ["raw_data", "semantic_header", "database"]
+    required = ["semantic_header", "database"]
     for field in required:
         if field not in ds:
             raise ValueError(

@@ -16,15 +16,3 @@ datasets:
     semantic_header: data/semantic_headers/bpic19.json
     dataset_description: data/semantic_headers/bpic19_DS.json
     database: bpic19
-
-  bpic17:
-    raw_data: data/raw/BPI_Challenge_2017.xes
-    semantic_header: data/semantic_headers/bpic17.json
-    dataset_description: data/semantic_headers/bpic17_DS.json
-    database: bpic17
-
-  bpic14:
-    raw_data: data/raw/BPI_Challenge_2014.xes
-    semantic_header: data/semantic_headers/bpic14.json
-    dataset_description: data/semantic_headers/bpic14_DS.json
-    database: bpic14

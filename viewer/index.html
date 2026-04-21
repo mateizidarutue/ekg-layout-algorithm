@@ -13,7 +13,7 @@
     <!-- ── Sidebar ── -->
     <aside id="sidebar">
       <header class="sidebar-header">
-        <span id="dataset-label" class="dataset-label">—</span>
+        <span id="dataset-label" class="dataset-label">-</span>
         <span id="panel-view-tag" class="view-tag">OVERVIEW</span>
       </header>
 
@@ -23,57 +23,67 @@
           <button id="btn-overview" class="btn btn-primary active">Overview</button>
           <button id="btn-variants" class="btn btn-primary">Variants</button>
         </div>
-        <button id="btn-back" class="btn btn-sm btn-back">← Back to overview</button>
+        <button id="btn-back" class="btn btn-sm btn-back">&lt;- Back to overview</button>
       </div>
 
       <!-- Camera -->
-      <div class="ctrl-group ctrl-row">
-        <button id="btn-fit" class="btn btn-sm">Fit</button>
-        <button id="btn-reset-zoom" class="btn btn-sm">Reset zoom</button>
+      <div class="ctrl-group">
+        <div class="ctrl-row">
+          <button id="btn-fit" class="btn btn-sm">Fit</button>
+          <button id="btn-reset-zoom" class="btn btn-sm">Reset zoom</button>
+        </div>
+        <div class="ctrl-hint">Pan: drag or arrow keys/WASD. Zoom: wheel or +/- . Fit: F. Reset: 0.</div>
       </div>
 
-      <!-- Detail filters (detail view only) -->
-      <div class="ctrl-group detail-only">
-        <button id="btn-deviants-only" class="btn btn-sm btn-toggle">Deviants only</button>
-        <button id="btn-sync-only" class="btn btn-sm btn-toggle">Sync only</button>
+      <!-- Overview/community summary -->
+      <div class="ctrl-group overview-community-only" id="overview-summary-panel">
+        <div class="ctrl-label section-label" id="overview-summary-title">Overview Summary</div>
+        <div id="overview-summary-content"></div>
       </div>
 
-      <!-- Max items slider (detail view only) -->
+      <!-- Detail filters -->
       <div class="ctrl-group detail-only">
-        <label class="ctrl-label">Max items
-          <span id="slider-max-items-val" class="ctrl-val">10</span>
+        <button id="btn-shared-only" class="btn btn-sm btn-toggle">Shared events only</button>
+      </div>
+
+      <!-- Max entities slider -->
+      <div class="ctrl-group detail-only">
+        <label class="ctrl-label">Max entities per type
+          <span id="slider-max-entities-val" class="ctrl-val">8</span>
         </label>
-        <input id="slider-max-items" type="range" min="1" max="50" value="10" class="slider" />
+        <input id="slider-max-entities" type="range" min="2" max="12" value="8" class="slider" />
+      </div>
+
+      <!-- Typed entity filters -->
+      <div class="ctrl-group detail-only">
+        <div class="ctrl-label section-label">Visible entity types</div>
+        <div id="entity-type-list"></div>
       </div>
 
       <!-- Edge visibility (not in variants) -->
-      <div class="ctrl-group not-variants">
+      <div class="ctrl-group detail-only">
         <div class="ctrl-label section-label">Edge layers</div>
         <label class="toggle-row">
-          <input id="toggle-dfitem" type="checkbox" checked />
-          DF Item
-          <input id="opa-dfitem" type="range" min="0.05" max="1" step="0.05" value="0.7" class="slider slider-inline" />
-          <span id="opa-dfitem-val" class="ctrl-val">0.7</span>
-        </label>
-        <label class="toggle-row">
-          <input id="toggle-dfpo" type="checkbox" />
-          <span id="label-dfpo">DF Case</span>
-          <input id="opa-dfpo" type="range" min="0.05" max="1" step="0.05" value="0.2" class="slider slider-inline" />
-          <span id="opa-dfpo-val" class="ctrl-val">0.2</span>
+          <input id="toggle-df" type="checkbox" checked />
+          DF
+          <input id="opa-df" type="range" min="0.05" max="1" step="0.05" value="0.78" class="slider slider-inline" />
+          <span id="opa-df-val" class="ctrl-val">0.78</span>
         </label>
         <label class="toggle-row">
           <input id="toggle-corr" type="checkbox" />
           CORR
-          <input id="opa-corr" type="range" min="0.05" max="1" step="0.05" value="0.2" class="slider slider-inline" />
-          <span id="opa-corr-val" class="ctrl-val">0.2</span>
+          <input id="opa-corr" type="range" min="0.05" max="1" step="0.05" value="0.22" class="slider slider-inline" />
+          <span id="opa-corr-val" class="ctrl-val">0.22</span>
         </label>
         <label class="toggle-row">
-          <input id="toggle-resources" type="checkbox" />
-          Resources
+          <input id="toggle-relations" type="checkbox" checked />
+          Relations
+          <input id="opa-relations" type="range" min="0.05" max="1" step="0.05" value="0.4" class="slider slider-inline" />
+          <span id="opa-relations-val" class="ctrl-val">0.4</span>
         </label>
         <label class="toggle-row">
           <input id="toggle-sync" type="checkbox" checked />
-          Sync events
+          Shared-event guides
         </label>
         <label class="toggle-row detail-only">
           <input id="toggle-bottleneck" type="checkbox" checked />
@@ -81,17 +91,47 @@
         </label>
       </div>
 
-      <!-- Case stats (detail view only) -->
-      <div class="ctrl-group detail-only" id="case-stats-panel">
-        <div class="ctrl-label section-label" id="case-stats-title">Case</div>
-        <div id="case-stats-content"></div>
+      <!-- Detail summary -->
+      <div class="ctrl-group detail-only" id="detail-summary-panel">
+        <div class="ctrl-label section-label" id="detail-summary-title">Analysis Summary</div>
+        <div id="detail-summary-content"></div>
       </div>
 
-      <!-- Case entity list -->
-      <div class="ctrl-group po-section">
-        <div class="ctrl-label section-label" id="cases-label">Cases</div>
-        <input id="po-search" type="text" placeholder="Search…" class="search-input" />
-        <div id="po-list" class="po-list"></div>
+      <!-- Variant summary -->
+      <div class="ctrl-group variants-only" id="variant-summary-panel">
+        <div class="ctrl-label section-label" id="variant-summary-title">Variant Summary</div>
+        <div id="variant-summary-content"></div>
+      </div>
+
+      <!-- Entity navigator -->
+      <div class="ctrl-group entity-section nav-entities">
+        <div class="ctrl-label section-label" id="entity-list-label">Entities</div>
+        <input id="entity-search" type="text" placeholder="Search..." class="search-input" />
+        <div id="entity-list" class="entity-list"></div>
+      </div>
+
+      <!-- Variant items -->
+      <div class="ctrl-group variants-only">
+        <div class="ctrl-label section-label" id="variant-item-list-label">Books in variant</div>
+        <div id="variant-item-list" class="entity-list"></div>
+      </div>
+
+      <!-- Variant members -->
+      <div class="ctrl-group variants-only">
+        <div class="ctrl-label section-label" id="variant-member-list-label">Members in variant</div>
+        <div id="variant-member-list" class="entity-list"></div>
+      </div>
+
+      <!-- Shared events -->
+      <div class="ctrl-group detail-only">
+        <div class="ctrl-label section-label">Shared-event hotspots</div>
+        <div id="shared-event-list" class="shared-event-list"></div>
+      </div>
+
+      <!-- Legend -->
+      <div class="ctrl-group detail-only">
+        <div class="ctrl-label section-label">Legend</div>
+        <div id="legend-content" class="legend-content"></div>
       </div>
 
       <!-- Activity filter -->
@@ -107,9 +147,8 @@
       <!-- Status bar -->
       <footer class="status-bar">
         <span id="status-events"></span>
-        <span id="status-po"></span>
-        <span id="status-items" class="detail-only-stat"></span>
-        <span id="status-df" class="detail-only-stat"></span>
+        <span id="status-entities"></span>
+        <span id="status-cases"></span>
       </footer>
     </aside>
 
@@ -118,7 +157,7 @@
 
     <!-- ── Canvas area ── -->
     <main class="canvas-area">
-      <div id="canvas-wrap" class="canvas-wrap">
+      <div id="canvas-wrap" class="canvas-wrap" tabindex="0" aria-label="Graph canvas. Use arrow keys or WASD to pan, plus and minus to zoom, 0 to reset, and F to fit.">
         <svg id="canvas" class="canvas"></svg>
 
         <!-- Tooltip -->
@@ -127,7 +166,7 @@
         <!-- Loading overlay -->
         <div id="loading" class="overlay-center hidden">
           <div class="spinner"></div>
-          <span>Loading…</span>
+          <span>Loading...</span>
         </div>
 
         <!-- Dropzone (when no server) -->
@@ -135,7 +174,7 @@
           <div class="dropzone-inner">
             <p>No dataset found.</p>
             <p class="dropzone-hint">Open a JSON bundle exported by the pipeline:</p>
-            <button id="btn-open-file" class="btn btn-primary">Open file…</button>
+            <button id="btn-open-file" class="btn btn-primary">Open file...</button>
             <input id="file-input" type="file" accept=".json" class="hidden" />
           </div>
         </div>

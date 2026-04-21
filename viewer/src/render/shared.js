@@ -128,7 +128,7 @@ export function activitySummary(entries) {
   return (entries ?? []).map(e => `${ellipsis(e.activity, 16)} (${e.count})`).join(", ");
 }
 
-export function poSuffix(poId) { return String(poId ?? "").slice(-4); }
+export function entitySuffix(entityId) { return String(entityId ?? "").slice(-4); }
 
 export function suffix(itemId) {
   const m = itemId.match(/_0*(\d+)$/);
@@ -142,7 +142,7 @@ export function eventRadius(d, EVENT_R) {
 export function syncContextRows(syncContexts) {
   if (!syncContexts?.length) return "";
   return `<div class="tip-divider"></div><div class="tip-subtitle">Shared lifecycle context</div>` +
-    syncContexts.map(c => `<div class="tip-row"><b>${c.entityId}</b></div><div class="tip-row">Prev: <b>${c.predecessorActivities?.join(", ") || "—"}</b></div><div class="tip-row">Next: <b>${c.successorActivities?.join(", ") || "—"}</b></div>`).join("");
+    syncContexts.map(c => `<div class="tip-row"><b>${c.entityId}</b></div><div class="tip-row">Prev: <b>${c.predecessorActivities?.join(", ") || "n/a"}</b></div><div class="tip-row">Next: <b>${c.successorActivities?.join(", ") || "n/a"}</b></div>`).join("");
 }
 
 export function computeFitTransform(svg, gRoot, totalHeight, options = {}) {

@@ -14,10 +14,11 @@ The JSON bundle is the stable contract between the pipeline and the viewer. Ever
   "generated_at":   "2024-01-15T12:00:00Z", // ISO-8601 UTC
   "promg_version":  "0.1.25",
   "stats": {
-    "n_events":    1234,
-    "n_entities":  456,
-    "n_corr":      789,
-    "n_df":        1011
+    "events":     1234,
+    "entities":   456,
+    "corr":       789,
+    "df":         1011,
+    "relations":  212
   },
   "events": [
     {
@@ -34,22 +35,35 @@ The JSON bundle is the stable contract between the pipeline and the viewer. Ever
   "entities": [
     {
       "entity_id":   "PO-100",          // string, unique (en.ID property)
-      "entity_type": "PO",              // non-"Entity" secondary Neo4j label
+      "entity_type": "PO",              // kept for backward compatibility
+      "primary_type":"PO",              // stable viewer type
+      "labels":      ["PO"],            // non-generic Neo4j labels
       "properties":  { "vendor": "Acme" }
     }
   ],
   "corr": [
     {
-      "event_id":  "e1",
-      "entity_id": "PO-100"
+      "event_id":      "e1",
+      "entity_id":     "PO-100",
+      "relation_type": "CORR"
     }
   ],
   "df": [
     {
       "source_event_id": "e1",
       "target_event_id": "e2",
-      "entity_id":       "ITEM-200",   // df.EntityId property on the DF edge
-      "entity_type":     "POItem"      // df.EntityType property on the DF edge
+      "entity_id":       "ITEM-200",   // required, must be non-empty
+      "entity_type":     "POItem"
+    }
+  ],
+  "relations": [
+    {
+      "source_entity_id":   "PO-100",
+      "target_entity_id":   "ITEM-200",
+      "source_entity_type": "PO",
+      "target_entity_type": "POItem",
+      "relation_type":      "HAS_ITEM",
+      "properties":         {}
     }
   ]
 }
@@ -61,6 +75,8 @@ The JSON bundle is the stable contract between the pipeline and the viewer. Ever
 - `entities[*].entity_id` must be globally unique within a bundle.
 - `corr[*].event_id` and `corr[*].entity_id` must each reference a valid ID from the `events` / `entities` arrays.
 - `df[*].source_event_id` and `df[*].target_event_id` must reference valid `event_id` values.
+- `df[*].entity_id` must reference a valid `entity_id` and may not be empty.
+- `relations[*].source_entity_id` and `relations[*].target_entity_id` must reference valid `entity_id` values.
 
 ---
 
@@ -109,18 +125,21 @@ python -m pipeline.export_json --dataset <name> --output output/<name>.json
 
 1. Connects to the Neo4j database specified for the dataset.
 2. Runs four Cypher queries (see `pipeline/cypher/`).
-3. Maps results to the §3 schema.
-4. Validates ID uniqueness and referential integrity.
-5. Writes the JSON bundle.
+3. Runs one additional Cypher query for non-event structural relations.
+4. Maps results to the §3 schema.
+5. Validates ID uniqueness and referential integrity.
+6. Fails export if DF edges cannot be resolved to an owning entity.
+7. Writes the JSON bundle.
 
 **Cypher queries:**
 
 | File | Query |
 |------|-------|
 | `events.cypher` | All `:Event` nodes with their properties |
-| `entities.cypher` | All `:Entity` nodes with labels and properties |
-| `corr.cypher` | All `:CORR` edges (Event → Entity) |
-| `df.cypher` | All `:DF` edges with `EntityId` and `EntityType` |
+| `entities.cypher` | All `:Entity` nodes with labels, stable `primary_type`, and properties |
+| `corr.cypher` | All Event → Entity correlations, preserving relationship type |
+| `df.cypher` | All `:DF` edges with resolved `entity_id` and `entity_type` |
+| `relations.cypher` | Structural non-event relationships between exported entities |
 
 ---
 
