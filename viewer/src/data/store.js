@@ -13,7 +13,6 @@ const OVERVIEW_KNN = 4;
 const OVERVIEW_SIM_MIN = 0.34;
 const OVERVIEW_LABEL_ACTIVITY_COUNT = 2;
 const OVERVIEW_MAX_COMMON_SHARE = 0.8;
-const DETAIL_DEFAULT_MAX_ENTITIES = 8;
 const GENERIC_LABELS = new Set(["Entity", "Resource", "EntityAttribute"]);
 const DETAIL_TYPE_ORDER = {
   library: ["Member", "Book", "Library", "SubscriptionAttribute"],
@@ -399,7 +398,9 @@ export function getDetailGraph(options = {}) {
   const anchorEntity = _store.entityById[anchorEntityId];
   if (!anchorEntity) throw new Error(`Unknown entity: ${anchorEntityId}`);
 
-  const maxEntitiesPerType = options.maxEntitiesPerType ?? DETAIL_DEFAULT_MAX_ENTITIES;
+  const maxEntitiesPerType = Number.isFinite(options.maxEntitiesPerType)
+    ? Math.max(1, options.maxEntitiesPerType)
+    : Number.POSITIVE_INFINITY;
   const compareEntityIds = _resolveCompareEntityIds(anchorEntity, options.compareEntityIds ?? [], options.compareMode, maxEntitiesPerType);
   const anchorSet = new Set([anchorEntityId, ...compareEntityIds]);
   const filteredSeedEvents = [...anchorSet].flatMap(entityId => _filterEvents(_store.eventsByEntityId[entityId] ?? [], options));
@@ -433,6 +434,9 @@ export function getDetailGraph(options = {}) {
     if (!entityIdsByType[entity.primary_type]) entityIdsByType[entity.primary_type] = [];
     entityIdsByType[entity.primary_type].push(entityId);
   });
+  const availableEntityCountsByType = Object.fromEntries(
+    Object.entries(entityIdsByType).map(([type, ids]) => [type, ids.length])
+  );
 
   const keptEntityIds = new Set();
   const bands = detailTypeOrder
@@ -558,6 +562,8 @@ export function getDetailGraph(options = {}) {
     scope: focusScope?.scope ?? "neighborhood",
     visibleEntityTypes: normalizedBands.map(band => band.entityType),
     visibleEntityIds: [...visibleEntityIds],
+    availableEntityCountsByType,
+    maxAvailableEntitiesPerType: Math.max(1, ...Object.values(availableEntityCountsByType)),
   };
 }
 
@@ -910,21 +916,25 @@ function _buildEntityList(entities, eventsByEntityId) {
 
 function _resolveDetailFocusScope(anchorEntity, filteredSeedEvents, seedEventIds) {
   if (!_store?.itemType || !_store?.caseType) return null;
-  if (anchorEntity.primary_type !== _store.itemType) return null;
+  const isItemAnchor = anchorEntity.primary_type === _store.itemType;
+  const isCaseAnchor = anchorEntity.primary_type === _store.caseType;
+  if (!isItemAnchor && !isCaseAnchor) return null;
 
   const contextEntityIds = new Set([anchorEntity.entity_id]);
   filteredSeedEvents.forEach(event => {
     (event.memberships ?? []).forEach(membership => {
       if (membership.entity_id === anchorEntity.entity_id) {
         contextEntityIds.add(membership.entity_id);
-      } else if (membership.entity_type === _store.caseType) {
+      } else if (isItemAnchor && membership.entity_type === _store.caseType) {
+        contextEntityIds.add(membership.entity_id);
+      } else if (isCaseAnchor && membership.entity_type === _store.itemType) {
         contextEntityIds.add(membership.entity_id);
       }
     });
   });
 
   return {
-    scope: "item-focus",
+    scope: isItemAnchor ? "item-focus" : "case-focus",
     contextEntityIds,
     visibleEventIds: new Set(seedEventIds),
   };

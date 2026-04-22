@@ -16,6 +16,11 @@ export const RELATION_PORT_X = TIMELINE_X0 - 26;
 const EVENT_STACK_GAP = 18;
 const EVENT_STACK_BASE_OFFSET = 12;
 const EVENT_STACK_CLEARANCE = 15;
+const SHARED_CLUSTER_GAP = 18;
+const SHARED_CLUSTER_ROW_GAP = 24;
+const SHARED_CLUSTER_BASE_OFFSET = 16;
+const SHARED_CLUSTER_H = 20;
+const SHARED_CLUSTER_CLEARANCE = 10;
 const HEADER_RESERVED_H = 86;
 
 export function computeDetailLayout(graph, width) {
@@ -26,22 +31,42 @@ export function computeDetailLayout(graph, width) {
   const anchors = [...(graph?.eventAnchors ?? [])].sort(_compareAnchors);
   const bands = [...(graph?.bands ?? [])];
   const allTimes = anchors.map(anchor => anchor.date?.getTime()).filter(Number.isFinite);
-  const minTime = allTimes.length ? Math.min(...allTimes) : 0;
-  const maxTime = allTimes.length ? Math.max(...allTimes) : 1;
-  const span = Math.max(maxTime - minTime, 1);
-
-  const xs = anchors.map(anchor => TIMELINE_X0 + (((anchor.date?.getTime?.() ?? minTime) - minTime) / span) * timelineW);
-  const stackRows = _assignAnchorRows(anchors, xs);
-  const stackDepth = Math.max(...stackRows, -1) + 1;
-  const axisY = DETAIL_PAD_TOP + HEADER_RESERVED_H + Math.max(stackDepth, 1) * EVENT_STACK_GAP + 18;
-
-  const laidAnchors = anchors.map((anchor, index) => ({
+  const timeScale = _buildTimeScale(allTimes, timelineW);
+  const seeds = anchors.map(anchor => ({
     ...anchor,
-    x: xs[index],
-    y: axisY - EVENT_STACK_BASE_OFFSET - stackRows[index] * EVENT_STACK_GAP,
-    stackRow: stackRows[index],
-    r: anchor.isSharedEvent ? EVENT_ANCHOR_R + Math.min(anchor.sharedEntityIds.length - 1, 4) : EVENT_ANCHOR_R,
+    x: timeScale.xForTime(anchor.date?.getTime?.()),
   }));
+  const soloAnchorSeeds = seeds.filter(anchor => !anchor.isSharedEvent);
+  const soloXs = soloAnchorSeeds.map(anchor => anchor.x);
+  const stackRows = _assignAnchorRows(soloAnchorSeeds, soloXs);
+  const stackDepth = Math.max(...stackRows, -1) + 1;
+  const clusterSeeds = _buildSharedEventClusters(seeds.filter(anchor => anchor.isSharedEvent));
+  const clusterDepth = Math.max(...clusterSeeds.map(cluster => cluster.stackRow), -1) + 1;
+  const railDepth = Math.max(
+    Math.max(stackDepth, 1) * EVENT_STACK_GAP,
+    clusterSeeds.length ? Math.max(clusterDepth, 1) * SHARED_CLUSTER_ROW_GAP + 8 : 0
+  );
+  const axisY = DETAIL_PAD_TOP + HEADER_RESERVED_H + railDepth + 18;
+  const sharedEventClusters = clusterSeeds.map(cluster => ({
+    ...cluster,
+    y: axisY - SHARED_CLUSTER_BASE_OFFSET - cluster.stackRow * SHARED_CLUSTER_ROW_GAP,
+  }));
+  const clusterByEventId = Object.fromEntries(sharedEventClusters.flatMap(cluster =>
+    cluster.eventIds.map(eventId => [eventId, cluster])
+  ));
+  let soloIndex = 0;
+  const laidAnchors = seeds.map(anchor => {
+    const cluster = anchor.isSharedEvent ? clusterByEventId[anchor.event_id] : null;
+    const stackRow = anchor.isSharedEvent ? cluster?.stackRow ?? 0 : stackRows[soloIndex++];
+    return {
+      ...anchor,
+      y: anchor.isSharedEvent
+        ? cluster?.y ?? (axisY - SHARED_CLUSTER_BASE_OFFSET)
+        : axisY - EVENT_STACK_BASE_OFFSET - stackRow * EVENT_STACK_GAP,
+      stackRow,
+      r: anchor.isSharedEvent ? EVENT_ANCHOR_R + Math.min(anchor.sharedEntityIds.length - 1, 4) : EVENT_ANCHOR_R,
+    };
+  });
   const anchorById = Object.fromEntries(laidAnchors.map(anchor => [anchor.event_id, anchor]));
 
   let currentY = axisY + 58;
@@ -108,7 +133,7 @@ export function computeDetailLayout(graph, width) {
         entity_id: lane.entity_id,
         entity_type: lane.entityType,
         x1: anchor.x,
-        y1: anchor.y + anchor.r + 2,
+        y1: anchor.isSharedEvent ? anchor.y + SHARED_CLUSTER_H / 2 + 2 : anchor.y + anchor.r + 2,
         x2: anchor.x,
         y2: lane.y - LANE_MARKER_R - 2,
       }))
@@ -124,7 +149,7 @@ export function computeDetailLayout(graph, width) {
       return {
         event_id: anchor.event_id,
         x: anchor.x,
-        y1: Math.min(anchor.y, ...membershipYs),
+        y1: Math.min(anchor.isSharedEvent ? anchor.y + SHARED_CLUSTER_H / 2 : anchor.y, ...membershipYs),
         y2: Math.max(anchor.y, ...membershipYs),
         entityCount: anchor.sharedEntityIds.length,
       };
@@ -151,6 +176,8 @@ export function computeDetailLayout(graph, width) {
 
   return {
     anchors: laidAnchors,
+    anchorRail: laidAnchors.filter(anchor => !anchor.isSharedEvent),
+    sharedEventClusters,
     bands: laidBands,
     corrLinks,
     sharedGuides,
@@ -159,7 +186,7 @@ export function computeDetailLayout(graph, width) {
       y: axisY,
       x1: TIMELINE_X0,
       x2: TIMELINE_X0 + timelineW,
-      ticks: _buildAxisTicks(minTime, maxTime, timelineW),
+      ticks: _buildAxisTicks(timeScale.rangeMin, timeScale.rangeMax, timelineW),
     },
     bandX,
     bandWidth,
@@ -170,6 +197,7 @@ export function computeDetailLayout(graph, width) {
     anchorEntityType: graph?.anchorEntityType ?? null,
     compareEntityIds: graph?.compareEntityIds ?? [],
     scope: graph?.scope ?? "neighborhood",
+    timeScale,
   };
 }
 
@@ -183,6 +211,92 @@ function _assignAnchorRows(anchors, xs) {
       rowEnds.push(x);
     } else {
       rowEnds[rowIndex] = x;
+    }
+    return rowIndex;
+  });
+}
+
+function _buildSharedEventClusters(sharedAnchors) {
+  if (!sharedAnchors.length) return [];
+  const sorted = [...sharedAnchors].sort((a, b) => a.x - b.x || _compareAnchors(a, b));
+  const clusters = [];
+  let current = null;
+
+  sorted.forEach(anchor => {
+    if (!current || anchor.x - current.maxX > SHARED_CLUSTER_GAP) {
+      current = {
+        id: `shared-cluster-${clusters.length + 1}`,
+        anchors: [anchor],
+        minX: anchor.x,
+        maxX: anchor.x,
+      };
+      clusters.push(current);
+    } else {
+      current.anchors.push(anchor);
+      current.maxX = anchor.x;
+    }
+  });
+
+  const prepared = clusters.map((cluster, index) => {
+    const eventIds = cluster.anchors.map(anchor => anchor.event_id);
+    const activityCounts = [];
+    const activityCountByName = new Map();
+    cluster.anchors.forEach(anchor => {
+      const key = anchor.activity ?? "Unknown";
+      const nextCount = (activityCountByName.get(key)?.count ?? 0) + 1;
+      const next = {
+        activity: key,
+        color: anchor.activityColor ?? "#64748b",
+        count: nextCount,
+      };
+      activityCountByName.set(key, next);
+    });
+    activityCounts.push(...[...activityCountByName.values()].sort((a, b) => b.count - a.count || a.activity.localeCompare(b.activity)));
+    const activityPalette = [...new Set(cluster.anchors.map(anchor => anchor.activityColor ?? "#64748b"))].slice(0, 4);
+    const sharedEntityIds = [...new Set(cluster.anchors.flatMap(anchor => anchor.sharedEntityIds ?? []))];
+    const entityTypes = [...new Set(cluster.anchors.flatMap(anchor =>
+      (anchor.memberships ?? []).map(membership => membership.entity_type)
+    ))];
+    const width = Math.max(30, 18 + activityPalette.length * 8 + String(eventIds.length).length * 8);
+    return {
+      id: `shared-cluster-${index + 1}`,
+      anchorIds: eventIds,
+      eventIds,
+      eventCount: eventIds.length,
+      x: cluster.anchors.reduce((sum, anchor) => sum + anchor.x, 0) / Math.max(cluster.anchors.length, 1),
+      minX: cluster.minX,
+      maxX: cluster.maxX,
+      minTime: cluster.anchors[0]?.date?.getTime?.() ?? null,
+      maxTime: cluster.anchors.at(-1)?.date?.getTime?.() ?? null,
+      sharedEntityIds,
+      sharedEntityCount: sharedEntityIds.length,
+      entityTypes,
+      width,
+      height: SHARED_CLUSTER_H,
+      activityPalette,
+      activityCounts,
+      representativeEventId: eventIds[0] ?? null,
+    };
+  });
+
+  const rows = _assignClusterRows(prepared);
+  return prepared.map((cluster, index) => ({
+    ...cluster,
+    stackRow: rows[index],
+    y: null,
+  }));
+}
+
+function _assignClusterRows(clusters) {
+  const rowEnds = [];
+  return clusters.map(cluster => {
+    const left = cluster.x - cluster.width / 2 - SHARED_CLUSTER_CLEARANCE;
+    let rowIndex = rowEnds.findIndex(lastRight => left - lastRight >= 0);
+    if (rowIndex === -1) {
+      rowIndex = rowEnds.length;
+      rowEnds.push(cluster.x + cluster.width / 2 + SHARED_CLUSTER_CLEARANCE);
+    } else {
+      rowEnds[rowIndex] = cluster.x + cluster.width / 2 + SHARED_CLUSTER_CLEARANCE;
     }
     return rowIndex;
   });
@@ -202,6 +316,63 @@ function _buildAxisTicks(minTime, maxTime, timelineW) {
         : "n/a",
     };
   });
+}
+
+function _buildTimeScale(allTimes, timelineW) {
+  if (!allTimes.length) {
+    const rangeMin = 0;
+    const rangeMax = 1;
+    return {
+      rangeMin,
+      rangeMax,
+      rawMin: rangeMin,
+      rawMax: rangeMax,
+      mode: "linear",
+      isClipped: false,
+      xForTime: () => TIMELINE_X0,
+    };
+  }
+
+  const sorted = [...allTimes].sort((a, b) => a - b);
+  const rawMin = sorted[0];
+  const rawMax = sorted.at(-1);
+  const rawSpan = Math.max(rawMax - rawMin, 1);
+  const q01 = _quantileSorted(sorted, 0.01);
+  const q99 = _quantileSorted(sorted, 0.99);
+  const robustSpan = Math.max(q99 - q01, 1);
+  const robustRatio = robustSpan / rawSpan;
+  const shouldClip = sorted.length >= 40
+    && robustRatio < 0.35
+    && (q01 > rawMin || q99 < rawMax);
+
+  const rangeMin = shouldClip ? q01 : rawMin;
+  const rangeMax = shouldClip ? q99 : rawMax;
+  const span = Math.max(rangeMax - rangeMin, 1);
+
+  return {
+    rangeMin,
+    rangeMax,
+    rawMin,
+    rawMax,
+    mode: shouldClip ? "robust-clipped" : "linear",
+    isClipped: shouldClip,
+    xForTime: time => {
+      const resolved = Number.isFinite(time) ? time : rangeMin;
+      const clamped = Math.max(rangeMin, Math.min(rangeMax, resolved));
+      return TIMELINE_X0 + ((clamped - rangeMin) / span) * timelineW;
+    },
+  };
+}
+
+function _quantileSorted(sorted, ratio) {
+  if (!sorted.length) return 0;
+  const clampedRatio = Math.max(0, Math.min(1, ratio));
+  const index = (sorted.length - 1) * clampedRatio;
+  const lo = Math.floor(index);
+  const hi = Math.ceil(index);
+  if (lo === hi) return sorted[lo];
+  const mix = index - lo;
+  return sorted[lo] * (1 - mix) + sorted[hi] * mix;
 }
 
 function _compareAnchors(a, b) {

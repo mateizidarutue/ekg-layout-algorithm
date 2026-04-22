@@ -29,6 +29,7 @@ let _detailReturnContext = { view: "overview", communityId: null, variantKey: nu
 let _keyboardCameraKeys = new Set();
 let _keyboardCameraFrame = null;
 let _keyboardCameraLastTs = 0;
+let _clusterActivityContext = null;
 let _filters = {
   activities: null,
   maxEntitiesPerType: 8,
@@ -86,9 +87,10 @@ async function _loadDataset(name) {
 
 function _afterLoad(store, name) {
   _filters.activities = null;
-  _filters.maxEntitiesPerType = parseInt(document.getElementById("slider-max-entities")?.value ?? "8", 10);
+  _filters.maxEntitiesPerType = null;
   _filters.visibleEntityTypes = null;
   _filters.sharedOnly = false;
+  _clusterActivityContext = null;
   _currentView = "overview";
   _selectedEntityId = store.caseList[0]?.id ?? store.entityList[0]?.id ?? null;
   _selectedCommunityId = null;
@@ -146,6 +148,8 @@ function _renderCurrentView() {
     _updateOverviewPanels(overviewGraph);
     _updateVariantPanels(null, null);
     _updateDetailPanels(null);
+    _updateClusterActivityPanel(null);
+    _syncMaxEntitiesSlider(null);
   } else if (_currentView === "variants") {
     const variantData = getVariantOverview({ activities: _filters.activities });
     variantData.variants.forEach(variant => { variant.isSelected = variant.key === _selectedVariantKey; });
@@ -187,11 +191,13 @@ function _renderCurrentView() {
     _updateOverviewPanels(null);
     _updateVariantPanels(variantData, selectedVariant);
     _updateDetailPanels(null);
+    _updateClusterActivityPanel(null);
+    _syncMaxEntitiesSlider(null);
   } else if (_currentView === "detail" && _selectedEntityId) {
     _detailGraph = getDetailGraph({
       anchorEntityId: _selectedEntityId,
       visibleEntityTypes: _filters.visibleEntityTypes ?? undefined,
-      activities: _filters.activities,
+      activities: _effectiveDetailActivities(),
       maxEntitiesPerType: _filters.maxEntitiesPerType,
       sharedOnly: _filters.sharedOnly,
     });
@@ -204,6 +210,8 @@ function _renderCurrentView() {
     _updateOverviewPanels(null);
     _updateVariantPanels(null, null);
     _updateDetailPanels(_detailGraph);
+    _updateClusterActivityPanel(_detailGraph);
+    _syncMaxEntitiesSlider(_detailGraph);
     _renderEntityTypeFilters(_detailGraph);
   }
 
@@ -224,11 +232,20 @@ function _makeCallbacks() {
       _renderCurrentView();
     },
     onVariantSelect: variantKey => _selectVariant(variantKey),
-    onEventSelect: d => _toggleSelection({
-      kind: "event",
-      eventId: d.id,
-      relatedEntityIds: d.sharedEntityIds ?? [],
-    }),
+    onEventSelect: d => {
+      if (d?.kind === "event-cluster") _setClusterActivityContext(d);
+      _toggleSelection(d?.kind === "event-cluster"
+        ? {
+          kind: "event-cluster",
+          eventIds: d.ids ?? [],
+          relatedEntityIds: d.sharedEntityIds ?? [],
+        }
+        : {
+          kind: "event",
+          eventId: d.id,
+          relatedEntityIds: d.sharedEntityIds ?? [],
+        });
+    },
     onEdgeSelect: d => _toggleSelection({
       kind: "edge",
       edgeId: d.edgeId,
@@ -244,6 +261,7 @@ function _openEntity(entityId, context = null) {
   _selectedEntityId = entityId;
   _currentView = "detail";
   _selection = null;
+  _clusterActivityContext = null;
   _renderCurrentView();
   _setActiveEntityInList(entityId);
 }
@@ -251,6 +269,7 @@ function _openEntity(entityId, context = null) {
 function _selectVariant(variantKey) {
   _selectedVariantKey = _selectedVariantKey === variantKey ? null : variantKey;
   _selection = null;
+  _clusterActivityContext = null;
   _renderCurrentView();
 }
 
@@ -302,11 +321,13 @@ function _setupControls() {
     _currentView = "overview";
     _selectedCommunityId = null;
     _selectedVariantKey = null;
+    _clusterActivityContext = null;
     _renderCurrentView();
   });
   document.getElementById("btn-variants")?.addEventListener("click", () => {
     _selectedCommunityId = null;
     _currentView = "variants";
+    _clusterActivityContext = null;
     _renderCurrentView();
   });
   document.getElementById("btn-back")?.addEventListener("click", () => {
@@ -331,6 +352,7 @@ function _setupControls() {
       }
       _selectedEntityId = null;
       _detailGraph = null;
+      _clusterActivityContext = null;
     }
     _renderCurrentView();
   });
@@ -343,7 +365,9 @@ function _setupControls() {
   const slider = document.getElementById("slider-max-entities");
   const sliderVal = document.getElementById("slider-max-entities-val");
   slider?.addEventListener("input", () => {
-    _filters.maxEntitiesPerType = parseInt(slider.value, 10);
+    const nextValue = parseInt(slider.value, 10);
+    const maxValue = parseInt(slider.max || slider.value, 10);
+    _filters.maxEntitiesPerType = nextValue >= maxValue ? null : nextValue;
     if (sliderVal) sliderVal.textContent = slider.value;
     if (_currentView === "detail") _renderCurrentView();
   });
@@ -447,6 +471,74 @@ function _syncToggleButtons() {
   document.getElementById("btn-shared-only")?.classList.toggle("active", _filters.sharedOnly);
 }
 
+function _effectiveDetailActivities() {
+  const scopedActivity = _clusterActivityContext?.selectedActivity ?? null;
+  if (!scopedActivity) return _filters.activities;
+  if (_filters.activities === null) return new Set([scopedActivity]);
+  if (_filters.activities.size === 0) return new Set();
+  return _filters.activities.has(scopedActivity) ? new Set([scopedActivity]) : new Set();
+}
+
+function _setClusterActivityContext(cluster) {
+  if (!cluster) {
+    _clusterActivityContext = null;
+    return;
+  }
+  const previous = _clusterActivityContext;
+  const next = {
+    clusterId: String(cluster.clusterId ?? cluster.id ?? ""),
+    eventIds: (cluster.ids ?? cluster.eventIds ?? []).map(eventId => String(eventId)),
+    sharedEntityIds: (cluster.sharedEntityIds ?? []).map(entityId => String(entityId)),
+    activityCounts: [...(cluster.activityCounts ?? [])]
+      .map(item => ({
+        activity: item.activity,
+        color: item.color,
+        count: item.count ?? 0,
+      }))
+      .sort((a, b) => b.count - a.count || a.activity.localeCompare(b.activity)),
+    selectedActivity: null,
+  };
+  if (previous?.clusterId === next.clusterId && previous.selectedActivity
+    && next.activityCounts.some(item => item.activity === previous.selectedActivity)) {
+    next.selectedActivity = previous.selectedActivity;
+  }
+  _clusterActivityContext = next;
+  _reconcileClusterActivityContext();
+}
+
+function _reconcileClusterActivityContext() {
+  if (!_clusterActivityContext) return;
+  const availableActivities = new Set((_clusterActivityContext.activityCounts ?? []).map(item => item.activity));
+  if (!availableActivities.size) {
+    _clusterActivityContext = null;
+    return;
+  }
+  if (_clusterActivityContext.selectedActivity && !availableActivities.has(_clusterActivityContext.selectedActivity)) {
+    _clusterActivityContext = { ..._clusterActivityContext, selectedActivity: null };
+    return;
+  }
+  if (_clusterActivityContext.selectedActivity && _filters.activities && !_filters.activities.has(_clusterActivityContext.selectedActivity)) {
+    _clusterActivityContext = { ..._clusterActivityContext, selectedActivity: null };
+  }
+}
+
+function _toggleClusterActivity(activity) {
+  if (!_clusterActivityContext) return;
+  _clusterActivityContext = {
+    ..._clusterActivityContext,
+    selectedActivity: _clusterActivityContext.selectedActivity === activity ? null : activity,
+  };
+  _reconcileClusterActivityContext();
+  if (_currentView === "detail") _renderCurrentView();
+}
+
+function _dismissClusterActivityContext() {
+  const hadScopedActivity = Boolean(_clusterActivityContext?.selectedActivity);
+  _clusterActivityContext = null;
+  if (_currentView === "detail" && hadScopedActivity) _renderCurrentView();
+  else _updateClusterActivityPanel(_detailGraph);
+}
+
 function _buildActivityList(store) {
   const container = document.getElementById("activity-list");
   if (!container) return;
@@ -465,11 +557,13 @@ function _buildActivityList(store) {
   document.getElementById("btn-act-all")?.addEventListener("click", () => {
     container.querySelectorAll("input").forEach(cb => { cb.checked = true; });
     _filters.activities = null;
+    _reconcileClusterActivityContext();
     if (_currentView === "detail" || _currentView === "overview" || _currentView === "community" || _currentView === "variants") _renderCurrentView();
   });
   document.getElementById("btn-act-none")?.addEventListener("click", () => {
     container.querySelectorAll("input").forEach(cb => { cb.checked = false; });
     _filters.activities = new Set();
+    _reconcileClusterActivityContext();
     if (_currentView === "detail" || _currentView === "overview" || _currentView === "community" || _currentView === "variants") _renderCurrentView();
   });
 }
@@ -483,6 +577,7 @@ function _onActivityToggle(activity, checked) {
     else _filters.activities.delete(activity);
     if (_filters.activities.size === store.allActivities.length) _filters.activities = null;
   }
+  _reconcileClusterActivityContext();
   if (_currentView === "detail" || _currentView === "overview" || _currentView === "community" || _currentView === "variants") _renderCurrentView();
 }
 
@@ -505,6 +600,38 @@ function _renderEntityTypeFilters(detailGraph) {
     });
     container.appendChild(row);
   });
+}
+
+function _syncMaxEntitiesSlider(detailGraph) {
+  const slider = document.getElementById("slider-max-entities");
+  const sliderVal = document.getElementById("slider-max-entities-val");
+  if (!slider || !sliderVal) return;
+
+  if (!detailGraph) {
+    slider.min = "1";
+    slider.max = "1";
+    slider.value = "1";
+    slider.disabled = true;
+    sliderVal.textContent = "-";
+    return;
+  }
+
+  const maxValue = Math.max(1, detailGraph.maxAvailableEntitiesPerType ?? 1);
+  const minValue = maxValue > 1 ? 1 : maxValue;
+  let effectiveValue = maxValue;
+  if (Number.isFinite(_filters.maxEntitiesPerType)) {
+    effectiveValue = Math.max(minValue, Math.min(_filters.maxEntitiesPerType, maxValue));
+  }
+
+  slider.min = String(minValue);
+  slider.max = String(maxValue);
+  slider.value = String(effectiveValue);
+  slider.disabled = maxValue <= 1;
+  sliderVal.textContent = String(effectiveValue);
+
+  if (Number.isFinite(_filters.maxEntitiesPerType) && _filters.maxEntitiesPerType >= maxValue) {
+    _filters.maxEntitiesPerType = null;
+  }
 }
 
 function _keyboardCameraAction(event) {
@@ -745,7 +872,7 @@ function _updateDetailPanels(detailGraph) {
   const summary = detailGraph.summary;
   if (summaryTitle) summaryTitle.textContent = `${detailGraph.anchorEntityType} ${detailGraph.anchorEntityId}`;
   const rows = [
-    { label: "Scope", value: detailGraph.scope === "item-focus" ? "Selected book/item overlap only" : "Local neighborhood" },
+    { label: "Scope", value: _detailScopeLabel(detailGraph.scope) },
     { label: "Entity types", value: summary.visibleEntityTypeCount },
     { label: "Entities", value: summary.visibleEntityCount },
     { label: "Events", value: summary.eventCount },
@@ -781,6 +908,64 @@ function _updateDetailPanels(detailGraph) {
       });
     });
   }
+}
+
+function _updateClusterActivityPanel(detailGraph) {
+  const panel = document.getElementById("cluster-activity-panel");
+  const title = document.getElementById("cluster-activity-title");
+  const content = document.getElementById("cluster-activity-content");
+  if (!panel || !title || !content) return;
+
+  const cluster = _clusterActivityContext;
+  if (!detailGraph || !cluster || (cluster.activityCounts?.length ?? 0) <= 1) {
+    panel.classList.add("hidden");
+    title.textContent = "Cluster event types";
+    content.innerHTML = "";
+    return;
+  }
+
+  const selectedActivity = cluster.selectedActivity ?? null;
+  const visibleActivities = cluster.activityCounts.filter(item => !_filters.activities || _filters.activities.has(item.activity));
+  const hiddenCount = cluster.activityCounts.length - visibleActivities.length;
+  panel.classList.remove("hidden");
+  title.textContent = "Cluster event types";
+  content.innerHTML = `
+    <div class="cluster-filter-meta">
+      Shared cluster with <b>${cluster.eventIds.length}</b> events across <b>${cluster.activityCounts.length}</b> event types.
+      ${selectedActivity ? `<br>Detail filter: <b>${selectedActivity}</b>` : ""}
+    </div>
+    <div class="cluster-filter-buttons">
+      ${cluster.activityCounts.map(item => `
+        <button
+          type="button"
+          class="cluster-filter-chip${selectedActivity === item.activity ? " active" : ""}"
+          data-activity="${_escapeAttr(item.activity)}"
+          ${_filters.activities && !_filters.activities.has(item.activity) ? "disabled" : ""}
+        >
+          <span class="cluster-filter-dot" style="background:${item.color ?? "#64748b"}"></span>
+          <span>${item.activity}</span>
+          <span class="cluster-filter-count">${item.count}</span>
+        </button>
+      `).join("")}
+    </div>
+    <div class="cluster-filter-actions">
+      <button type="button" class="btn btn-xs" id="btn-clear-cluster-filter"${selectedActivity ? "" : " disabled"}>Clear filter</button>
+      <button type="button" class="btn btn-xs" id="btn-close-cluster-filter">Close</button>
+    </div>
+    ${hiddenCount > 0
+      ? `<div class="cluster-filter-note">${hiddenCount} event type${hiddenCount === 1 ? "" : "s"} hidden by the current global activity filter.</div>`
+      : `<div class="cluster-filter-note">Click an event type to keep only that activity in the current detail view.</div>`}
+  `;
+
+  content.querySelectorAll(".cluster-filter-chip").forEach(button => {
+    button.addEventListener("click", () => _toggleClusterActivity(button.dataset.activity));
+  });
+  content.querySelector("#btn-clear-cluster-filter")?.addEventListener("click", () => {
+    if (!_clusterActivityContext?.selectedActivity) return;
+    _clusterActivityContext = { ..._clusterActivityContext, selectedActivity: null };
+    if (_currentView === "detail") _renderCurrentView();
+  });
+  content.querySelector("#btn-close-cluster-filter")?.addEventListener("click", () => _dismissClusterActivityContext());
 }
 
 function _updateOverviewPanels(overviewGraph) {
@@ -914,7 +1099,7 @@ function _renderLegend() {
   if (!el) return;
   el.innerHTML = `
     <div class="legend-item"><span class="legend-swatch legend-event"></span><span>Event anchor</span></div>
-    <div class="legend-item"><span class="legend-swatch legend-shared"></span><span>Shared event</span></div>
+    <div class="legend-item"><span class="legend-swatch legend-shared"></span><span>Shared-event cluster</span></div>
     <div class="legend-item"><span class="legend-swatch legend-df"></span><span>DF edge</span></div>
     <div class="legend-item"><span class="legend-swatch legend-bottleneck"></span><span>Bottleneck DF edge</span></div>
     <div class="legend-item"><span class="legend-swatch legend-corr"></span><span>Correlation link</span></div>
@@ -954,6 +1139,20 @@ function _formatParallelBandPreview(parallelBands = []) {
     .join(", ");
 }
 
+function _escapeAttr(value) {
+  return String(value ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("\"", "&quot;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;");
+}
+
+function _detailScopeLabel(scope) {
+  if (scope === "item-focus") return "Selected book/item overlap only";
+  if (scope === "case-focus") return "Selected member/case overlap only";
+  return "Local neighborhood";
+}
+
 function _applyVisibility() {
   if (!gRoot) return;
   gRoot.selectAll(".df-link").attr("display", vis.df ? null : "none").attr("opacity", opa.df);
@@ -975,7 +1174,7 @@ function _clearSelection() {
 
 function _applySelectionState() {
   if (!gRoot) return;
-  const anchors = gRoot.selectAll(".event-anchor-core");
+  const anchors = gRoot.selectAll(".event-anchor-core, .event-cluster-core");
   const markers = gRoot.selectAll(".lane-marker-circle");
   const dfEdges = gRoot.selectAll(".df-link");
   const lanes = gRoot.selectAll(".entity-lane");
@@ -989,20 +1188,22 @@ function _applySelectionState() {
 
   if (!_selection) return;
 
-  if (_selection.kind === "event") {
+  if (_selection.kind === "event" || _selection.kind === "event-cluster") {
+    const selectedEventIds = new Set((_selection.kind === "event" ? [_selection.eventId] : (_selection.eventIds ?? []))
+      .map(eventId => String(eventId)));
     const related = new Set(_selection.relatedEntityIds ?? []);
-    anchors.classed("highlighted", function() { return d3.select(this.parentNode).attr("data-event-id") === _selection.eventId; })
-      .classed("dimmed", function() { return d3.select(this.parentNode).attr("data-event-id") !== _selection.eventId; });
-    markers.classed("highlighted", function() { return d3.select(this.parentNode).attr("data-event-id") === _selection.eventId; })
-      .classed("dimmed", function() { return d3.select(this.parentNode).attr("data-event-id") !== _selection.eventId; });
+    anchors.classed("highlighted", function() { return _datumIntersectsEvents(d3.select(this.parentNode).datum(), selectedEventIds); })
+      .classed("dimmed", function() { return !_datumIntersectsEvents(d3.select(this.parentNode).datum(), selectedEventIds); });
+    markers.classed("highlighted", function() { return selectedEventIds.has(d3.select(this.parentNode).attr("data-event-id")); })
+      .classed("dimmed", function() { return !selectedEventIds.has(d3.select(this.parentNode).attr("data-event-id")); });
     lanes.classed("item-highlighted", function() { return related.has(d3.select(this).attr("data-entity-id")); })
       .classed("item-dimmed", function() { return related.size ? !related.has(d3.select(this).attr("data-entity-id")) : false; });
-    corrLinks.classed("edge-highlighted", function() { return d3.select(this).attr("data-event-id") === _selection.eventId; })
-      .classed("edge-dimmed", function() { return d3.select(this).attr("data-event-id") !== _selection.eventId; });
+    corrLinks.classed("edge-highlighted", function() { return selectedEventIds.has(d3.select(this).attr("data-event-id")); })
+      .classed("edge-dimmed", function() { return !selectedEventIds.has(d3.select(this).attr("data-event-id")); });
   } else if (_selection.kind === "edge") {
-    const activeEvents = new Set([_selection.sourceId, _selection.targetId]);
-    anchors.classed("highlighted", function() { return activeEvents.has(d3.select(this.parentNode).attr("data-event-id")); })
-      .classed("dimmed", function() { return !activeEvents.has(d3.select(this.parentNode).attr("data-event-id")); });
+    const activeEvents = new Set([_selection.sourceId, _selection.targetId].map(eventId => String(eventId)));
+    anchors.classed("highlighted", function() { return _datumIntersectsEvents(d3.select(this.parentNode).datum(), activeEvents); })
+      .classed("dimmed", function() { return !_datumIntersectsEvents(d3.select(this.parentNode).datum(), activeEvents); });
     markers.classed("highlighted", function() { return activeEvents.has(d3.select(this.parentNode).attr("data-event-id")); })
       .classed("dimmed", function() { return !activeEvents.has(d3.select(this.parentNode).attr("data-event-id")); });
     dfEdges.classed("edge-highlighted", function() { return d3.select(this).attr("data-edge-id") === _selection.edgeId; })
@@ -1010,6 +1211,12 @@ function _applySelectionState() {
     lanes.classed("item-highlighted", function() { return d3.select(this).attr("data-entity-id") === _selection.entityId; })
       .classed("item-dimmed", function() { return d3.select(this).attr("data-entity-id") !== _selection.entityId; });
   }
+}
+
+function _datumIntersectsEvents(datum, eventIds) {
+  if (!datum || !eventIds?.size) return false;
+  if (datum.event_id) return eventIds.has(String(datum.event_id));
+  return (datum.eventIds ?? []).some(eventId => eventIds.has(String(eventId)));
 }
 
 function _fitToView(totalHeight, options = {}) {

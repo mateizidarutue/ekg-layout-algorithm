@@ -32,12 +32,20 @@ export function drawDetailView(layout, lBg, lMeta, lDfPo, lCorr, lRes, lDfItem, 
 
   _drawAxis(layout.axis, layout.totalHeight, lBg, lLabels);
 
-  lMeta.selectAll(null).data(layout.anchors.filter(anchor => anchor.y < layout.axis.y - 6)).join("line")
+  lMeta.selectAll(null).data(layout.anchorRail.filter(anchor => anchor.y < layout.axis.y - 6)).join("line")
     .attr("class", "event-stem")
     .attr("x1", d => d.x).attr("y1", d => d.y + d.r + 2)
     .attr("x2", d => d.x).attr("y2", layout.axis.y - 4)
     .attr("stroke", "rgba(148,163,184,0.32)")
     .attr("stroke-width", 1.1);
+
+  lMeta.selectAll(null).data(layout.sharedEventClusters).join("line")
+    .attr("class", "event-stem event-stem-cluster")
+    .attr("x1", d => d.x).attr("y1", d => d.y + d.height / 2 + 2)
+    .attr("x2", d => d.x).attr("y2", layout.axis.y - 4)
+    .attr("stroke", "rgba(37,99,235,0.22)")
+    .attr("stroke-width", 1.25)
+    .attr("stroke-dasharray", "4 5");
 
   lMeta.selectAll(null).data(layout.sharedGuides).join("line")
     .attr("class", "shared-guide")
@@ -71,8 +79,8 @@ export function drawDetailView(layout, lBg, lMeta, lDfPo, lCorr, lRes, lDfItem, 
     .attr("stroke-width", 1)
     .attr("stroke-dasharray", "3 5");
 
-  const anchorNodes = lNodes.selectAll(null).data(layout.anchors).join("g")
-    .attr("class", d => d.isSharedEvent ? "event-anchor event-anchor-shared" : "event-anchor")
+  const anchorNodes = lNodes.selectAll(null).data(layout.anchorRail).join("g")
+    .attr("class", "event-anchor")
     .attr("data-event-id", d => d.event_id)
     .attr("transform", d => `translate(${d.x},${d.y})`)
     .style("cursor", "pointer")
@@ -89,27 +97,97 @@ export function drawDetailView(layout, lBg, lMeta, lDfPo, lCorr, lRes, lDfItem, 
   anchorNodes.append("circle")
     .attr("r", d => d.r + (d.isSharedEvent ? 5 : 3))
     .attr("fill", "rgba(255,255,255,0.96)")
-    .attr("stroke", d => d.isSharedEvent ? "rgba(37,99,235,0.44)" : "rgba(100,116,139,0.18)")
-    .attr("stroke-width", d => d.isSharedEvent ? 2.2 : 1.2)
+    .attr("stroke", "rgba(100,116,139,0.18)")
+    .attr("stroke-width", 1.2)
     .attr("class", "event-anchor-ring");
 
   anchorNodes.append("circle")
     .attr("r", d => d.r)
     .attr("fill", d => d.activityColor ?? "#64748b")
     .attr("stroke", "rgba(255,255,255,0.92)")
-    .attr("stroke-width", d => d.isSharedEvent ? 1.9 : 1.2)
+    .attr("stroke-width", 1.2)
     .attr("class", "event-anchor-core");
 
-  anchorNodes.filter(d => d.isSharedEvent).append("text")
-    .attr("text-anchor", "middle").attr("dy", "0.34em")
-    .attr("font-family", "JetBrains Mono, monospace").attr("font-size", "8px").attr("font-weight", "700")
-    .attr("fill", "#0f172a").text(d => d.sharedEntityIds.length);
+  const clusterNodes = lNodes.selectAll(null).data(layout.sharedEventClusters).join("g")
+    .attr("class", "event-cluster")
+    .attr("data-event-ids", d => d.eventIds.join("|"))
+    .attr("transform", d => `translate(${d.x},${d.y})`)
+    .style("cursor", "pointer")
+    .on("click", (ev, d) => {
+      ev.stopPropagation();
+      cb.onEventSelect?.(d.eventIds.length > 1
+        ? {
+          kind: "event-cluster",
+          clusterId: d.id,
+          ids: d.eventIds,
+          sharedEntityIds: d.sharedEntityIds,
+          activityCounts: d.activityCounts,
+        }
+        : {
+          id: d.representativeEventId,
+          sharedEntityIds: d.sharedEntityIds,
+        });
+    })
+    .on("mousemove", (ev, d) => cb.onTooltipShow(_sharedClusterTooltip(d), ev.offsetX, ev.offsetY))
+    .on("mouseleave", cb.onTooltipHide);
+
+  clusterNodes.append("rect")
+    .attr("x", d => -d.width / 2)
+    .attr("y", d => -d.height / 2)
+    .attr("width", d => d.width)
+    .attr("height", d => d.height)
+    .attr("rx", d => Math.min(d.height / 2, 10))
+    .attr("fill", "rgba(255,255,255,0.94)")
+    .attr("stroke", "rgba(37,99,235,0.28)")
+    .attr("stroke-width", 1.2)
+    .attr("class", "event-cluster-shell");
+
+  clusterNodes.append("rect")
+    .attr("x", d => -d.width / 2 + 3)
+    .attr("y", d => -d.height / 2 + 3)
+    .attr("width", d => Math.max(d.width - 6, 18))
+    .attr("height", d => Math.max(d.height - 6, 14))
+    .attr("rx", d => Math.min((d.height - 6) / 2, 8))
+    .attr("fill", "rgba(219,234,254,0.9)")
+    .attr("stroke", "rgba(96,165,250,0.42)")
+    .attr("stroke-width", 1)
+    .attr("class", "event-cluster-core");
+
+  clusterNodes.each(function(d) {
+    const swatchStartX = -d.width / 2 + 10;
+    const swatchGap = 8;
+    const g = d3.select(this);
+    g.selectAll(".event-cluster-swatch")
+      .data(d.activityPalette.map((color, index) => ({
+        color,
+        x: swatchStartX + index * swatchGap,
+      })))
+      .join("circle")
+      .attr("class", "event-cluster-swatch")
+      .attr("cx", item => item.x)
+      .attr("cy", 0)
+      .attr("r", 2.9)
+      .attr("fill", item => item.color)
+      .attr("stroke", "rgba(255,255,255,0.9)")
+      .attr("stroke-width", 0.8);
+  });
+
+  clusterNodes.append("text")
+    .attr("x", d => d.width / 2 - 11)
+    .attr("y", 0)
+    .attr("text-anchor", "end")
+    .attr("dy", "0.34em")
+    .attr("font-family", "JetBrains Mono, monospace")
+    .attr("font-size", "9px")
+    .attr("font-weight", "700")
+    .attr("fill", "#0f172a")
+    .text(d => d.eventCount);
 
   lLabels.append("text")
     .attr("x", DETAIL_PAD_X).attr("y", 40)
     .attr("font-family", "JetBrains Mono, monospace").attr("font-size", "10px").attr("font-weight", "700")
     .attr("letter-spacing", "0.14em").attr("fill", "var(--text-dim)")
-    .text(layout.scope === "item-focus" ? "BOOK / ITEM FOCUS" : "MULTI-ENTITY DETAIL");
+    .text(_detailModeLabel(layout.scope));
 
   lLabels.append("text")
     .attr("x", DETAIL_PAD_X).attr("y", 64)
@@ -121,7 +199,13 @@ export function drawDetailView(layout, lBg, lMeta, lDfPo, lCorr, lRes, lDfItem, 
     .attr("x", DETAIL_PAD_X).attr("y", 84)
     .attr("font-family", "JetBrains Mono, monospace").attr("font-size", "10px")
     .attr("fill", "var(--text-dim)")
-    .text(`${layout.bands.length} types / ${totalEntities} entities / ${layout.anchors.length} events`);
+    .text(`${layout.bands.length} types / ${totalEntities} entities / ${layout.anchors.length} events${layout.timeScale?.isClipped ? " / robust time scale" : ""}`);
+}
+
+function _detailModeLabel(scope) {
+  if (scope === "item-focus") return "BOOK / ITEM FOCUS";
+  if (scope === "case-focus") return "MEMBER / CASE FOCUS";
+  return "MULTI-ENTITY DETAIL";
 }
 
 function _drawAxis(axis, totalHeight, lBg, lLabels) {
@@ -295,6 +379,26 @@ function _eventTooltip(anchor) {
     .map(membership => `<div class="tip-row">${membership.entity_type}: <b>${membership.entity_label}</b></div>`)
     .join("");
   return `<div class="tip-title">${anchor.activity}</div><div class="tip-row">Event: <b>${anchor.event_id}</b></div><div class="tip-row">Time: <b>${timestamp}</b></div><div class="tip-row">Shared: <b>${anchor.sharedEntityIds.length > 1 ? `Yes (${anchor.sharedEntityIds.length})` : "No"}</b></div>${resourceRows}<div class="tip-divider"></div>${membershipRows}`;
+}
+
+function _sharedClusterTooltip(cluster) {
+  const firstTime = Number.isFinite(cluster.minTime) ? new Date(cluster.minTime) : null;
+  const lastTime = Number.isFinite(cluster.maxTime) ? new Date(cluster.maxTime) : null;
+  const timeLabel = firstTime && lastTime
+    ? (cluster.minTime === cluster.maxTime
+      ? firstTime.toLocaleString("en-GB")
+      : `${firstTime.toLocaleDateString("en-GB")} - ${lastTime.toLocaleDateString("en-GB")}`)
+    : "n/a";
+  const topActivities = cluster.activityCounts
+    .slice(0, 3)
+    .map(item => `${item.activity} (${item.count})`)
+    .join(", ");
+  const eventPreview = cluster.eventIds.slice(0, 5).join(", ");
+  const eventTail = cluster.eventIds.length > 5 ? ` (+${cluster.eventIds.length - 5} more)` : "";
+  const filterHint = cluster.activityCounts.length > 1
+    ? `<div class="tip-row" style="margin-top:5px;color:var(--accent);font-size:10px">Click to open event-type filters for this cluster</div>`
+    : "";
+  return `<div class="tip-title">Shared-event cluster</div><div class="tip-row">Events: <b>${cluster.eventCount}</b></div><div class="tip-row">Entities: <b>${cluster.sharedEntityCount}</b></div><div class="tip-row">Entity types: <b>${cluster.entityTypes.join(", ") || "n/a"}</b></div><div class="tip-row">Time span: <b>${timeLabel}</b></div><div class="tip-row">Top activities: <b>${topActivities || "n/a"}</b></div>${filterHint}<div class="tip-divider"></div><div class="tip-row">Event ids: <b>${eventPreview}${eventTail}</b></div>`;
 }
 
 function _laneTooltip(lane) {

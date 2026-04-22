@@ -1,430 +1,470 @@
-# BEP — EKG Viewer & Pipeline
+# Event Knowledge Graph Layout Prototype
 
-Evaluation artifact for the Bachelor's thesis *"Layout Algorithms for Event Knowledge Graphs"*.
+This repository is the evaluation artifact for a thesis on layout algorithms for Event Knowledge Graphs (EKGs).
 
-Provides a **Python pipeline** (CSV/XES → PromG → Neo4j → JSON) and a **browser-based viewer** (D3.js, ES modules, no build step) for exploring multi-entity Event Knowledge Graphs.
+It contains:
 
----
+- a Python pipeline that builds typed EKGs in Neo4j through PromG,
+- a JSON export layer that turns the graph into a viewer bundle,
+- a browser-based prototype that supports overview, variant, and multi-entity detail analysis.
 
-## Table of contents
+The repository is organized around one core idea: flat case-centric process views are not enough for object-centric processes such as purchase orders with items, or members borrowing multiple books. The prototype therefore treats an execution as a typed graph of interacting entities and visualizes it with layouts that preserve both time and cross-entity structure.
 
-1. [What is an Event Knowledge Graph?](#1-what-is-an-event-knowledge-graph)
-2. [Pipeline overview](#2-pipeline-overview)
-3. [How the transformations work](#3-how-the-transformations-work)
-4. [Prerequisites & setup](#4-prerequisites--setup)
-5. [Running the pipeline](#5-running-the-pipeline)
-6. [Using the viewer](#6-using-the-viewer)
-7. [Datasets](#7-datasets)
-8. [Project layout](#8-project-layout)
-9. [Configuration reference](#9-configuration-reference)
-10. [Troubleshooting](#10-troubleshooting)
+## Thesis Alignment
 
----
+The prototype is built to address the thesis problem statement: how to lay out EKGs so that users can understand interacting entities, shared events, and process variants without collapsing the process back into a single-case log.
 
-## 1. What is an Event Knowledge Graph?
+The current implementation aligns with that goal in three ways:
 
-A traditional process mining event log records events in a single flat table: each row is one event, identified by a case ID. This works well when each process instance has exactly one "case" entity, but real processes involve many interacting objects — a purchase order contains multiple items, each processed independently, each involved in different activities by different resources.
+1. It builds a typed EKG, not a flat log.
+   Events, entities, correlations, directly-follows edges, and structural entity-to-entity relations are all preserved.
 
-An **Event Knowledge Graph (EKG)** extends the flat log into a property graph where:
+2. It separates analysis into three coordinated views.
+   The overview shows communities of similar cases, the variant view focuses on dominant item-level behavior, and the detail view shows a local multi-entity slice around one selected entity.
 
-- **Event nodes** represent individual activity executions, with a timestamp and activity label.
-- **Entity nodes** represent objects that participate in the process (purchase orders, items, resources, vendors, …).
-- **CORR edges** link each event to every entity it involves.
-- **DF edges** (directly-follows) connect consecutive events for a given entity, forming per-entity timelines.
+3. It emphasizes the layout requirements from the thesis.
+   The detail view uses one horizontal time axis, one band per entity type, one lane per entity instance, explicit shared-event guides, clustered shared-event markers at the top, and optional DF and structural relation layers.
 
-Because every entity has its own timeline, an EKG supports simultaneous analysis across multiple case notions without duplicating events.
+In practical terms, the prototype supports:
 
----
+- locating and opening an arbitrary entity,
+- inspecting its local multi-entity context,
+- seeing where events are shared across entity timelines,
+- grouping similar cases into communities,
+- grouping similar item traces into variants,
+- drilling from overview or variants into detail.
 
-## 2. Pipeline overview
+## Supported Datasets
 
-```
-Raw event log (CSV / XES)
-        │
-        ▼
-┌───────────────────┐
-│  Stage 1+2        │  build_ekg.py
-│  Ingest & Build   │  uses PromG v0.1.25
-│                   │  writes to Neo4j
-└───────────────────┘
-        │
-        ▼
-   Neo4j database
-  (:Event, :Entity,
-   :CORR, :DF edges)
-        │
-        ▼
-┌───────────────────┐
-│  Stage 3          │  export_json.py
-│  Export to JSON   │  Cypher → JSON bundle
-└───────────────────┘
-        │
-        ▼
-  output/<dataset>.json
-        │
-        ▼
-┌───────────────────┐
-│  Stage 4          │  viewer/index.html
-│  Browser viewer   │  D3.js visualisation
-└───────────────────┘
-```
+The repository is currently complete for two datasets:
 
----
+- `library`
+- `bpic19`
 
-## 3. How the transformations work
+`library` is the easiest dataset for testing the full pipeline.
 
-### 3.1 Input files
+`bpic19` is supported in two forms:
 
-Each dataset needs two JSON description files in `data/semantic_headers/`:
+- full EKG build in Neo4j,
+- sampled viewer export for browser use.
 
-| File | Purpose |
-|------|---------|
-| `<dataset>.json` | **Semantic header** — declares which node and relationship types to construct and from which record types |
-| `<dataset>_DS.json` | **Dataset description** — maps CSV column names to PromG attribute names, specifies file paths, encoding, timestamp format, and optional sample case IDs |
+The browser prototype is intentionally run on a sampled BPIC19 export, because a full BPIC19 JSON bundle is too large for this client-side viewer architecture.
 
-### 3.2 The semantic header
+## Repository Walkthrough
 
-The semantic header is the core declarative specification. It contains two sections:
-
-**`records`** — pattern expressions that classify each CSV row into one or more typed records. A record is essentially a named projection of selected columns, optionally with a `WHERE` filter:
-
-```json
-"(record:EventRecord {timestamp, activity})"
-"(record:VendorEventRecord WHERE record.activity = 'Vendor creates invoice' {vendorId, vendorName})"
-"(record:HumanResourceRecord WHERE record.resourceId STARTS WITH 'user' {resourceId})"
-```
-
-Every CSV row that matches a record's condition is labelled with that record type in Neo4j. A single row can match multiple record types simultaneously (e.g. every row matches `EventRecord`; rows where the activity is 'Vendor creates invoice' also match `VendorEventRecord` and `InvoiceRecord`).
-
-**`nodes`** — declares how to merge entity and event nodes from matching records:
-
-```json
-{
-  "type": "PurchaseOrder",
-  "constructor": [{
-    "prevalent_record": "(record:PurchaseOrderRecord)",
-    "result": "(v:Entity:PurchaseOrder {sysId: record.purchaseOrderId, documentType: record.PODocumentType})",
-    "infer_corr_from_event_record": true
-  }],
-  "infer_df": true,
-  "include_label_in_df": true,
-  "merge_duplicate_df": true
-}
+```text
+bep/
+|-- config.yaml
+|-- requirements.txt
+|-- docs/
+|   `-- PIPELINE.md
+|-- data/
+|   |-- raw/
+|   `-- semantic_headers/
+|       |-- library.json
+|       |-- library_DS.json
+|       |-- bpic19.json
+|       `-- bpic19_DS.json
+|-- output/
+|-- pipeline/
+|   |-- build_ekg.py
+|   |-- export_json.py
+|   |-- config_loader.py
+|   `-- cypher/
+|       |-- events.cypher
+|       |-- entities.cypher
+|       |-- corr.cypher
+|       |-- df.cypher
+|       `-- relations.cypher
+|-- scripts/
+|   `-- check_neo4j.py
+`-- viewer/
+    |-- index.html
+    |-- style.css
+    `-- src/
+        |-- main.js
+        |-- data/
+        |   |-- loader.js
+        |   `-- store.js
+        |-- layout/
+        |   |-- detailLayout.js
+        |   `-- overviewLayout.js
+        `-- render/
+            |-- detailRender.js
+            |-- overviewRender.js
+            `-- shared.js
 ```
 
-Key options:
-- `infer_corr_from_event_record: true` — automatically creates a CORR edge from the event (derived from the same CSV row) to the newly created entity node.
-- `corr_type` — overrides the default CORR label (e.g. `"EXECUTED_BY"` for resources, `"CREATED_BY"` for vendors).
-- `infer_df: true` — after all nodes are created, computes directly-follows edges between consecutive events sharing the same entity, ordered by timestamp.
-- `include_label_in_df: true` — names the DF relationship `DF_PURCHASEORDER` instead of the generic `DF`, so different entity types are distinguishable.
-- `merge_duplicate_df: true` — collapses repeated (source, target) pairs into a single DF edge with a count property.
+Read this structure from top to bottom:
 
-**`relations`** — declares explicit structural relationships between entity types, derived from rows that simultaneously hold two record types:
+- `pipeline/` creates the graph and exports it.
+- `output/` stores the JSON bundles used by the viewer.
+- `viewer/` re-derives analytical structure client-side and renders the layouts.
 
-```json
-{
-  "type": "HAS_ITEM",
-  "constructor": {
-    "prevalent_record": "(:PurchaseOrderRecord:PurchaseOrderItemRecord)",
-    "from_node": "(po:PurchaseOrder)",
-    "to_node": "(poi:PurchaseOrderItem)",
-    "result": "(po) - [:HAS_ITEM] -> (poi)"
-  }
-}
+## How To Build And Run The Prototype
+
+All commands below assume you are in:
+
+```powershell
+cd C:\Users\matei\Documents\GitHub\complex_bep\bep
 ```
 
-This creates a `HAS_ITEM` edge between a PurchaseOrder node and a PurchaseOrderItem node whenever a CSV row carries both record labels.
+### 1. Create the Python environment
 
-### 3.3 Step-by-step construction (what PromG does)
-
-```
-CSV rows
-   │
-   ▼  import_data()
-Each row loaded as a :Record node in Neo4j with all mapped attributes.
-Timestamps are parsed and stored as native Neo4j DateTime.
-Sample filter applied here if --sample is used.
-   │
-   ▼  create_nodes()
-For each node constructor in the semantic header:
-  - MATCH records of the declared type(s)
-  - MERGE entity/event node with the specified properties
-  - If infer_corr_from_event_record: MERGE a CORR edge from the event to the entity
-   │
-   ▼  create_relations()
-For each relation constructor:
-  - MATCH records that carry all required record labels
-  - MERGE the relationship between the matched entity nodes
-   │
-   ▼  create_df_edges()
-For each entity type with infer_df: true:
-  - For every entity node, collect its correlated events in timestamp order
-  - Create DF edges between consecutive events
-  - Edge carries entityId and entityType properties
-```
-
-### 3.4 The export (Stage 3)
-
-`export_json.py` runs four Cypher queries against the populated Neo4j database and serialises the results to a flat JSON bundle:
-
-| Cypher file | What it extracts |
-|-------------|-----------------|
-| `events.cypher` | All `:Event` nodes — `event_id` (Neo4j internal id), `activity`, `timestamp`, remaining properties |
-| `entities.cypher` | All `:Entity` nodes — `entity_id` (from `sysId` or `ID` property), secondary label as `entity_type`, remaining properties |
-| `corr.cypher` | All event→entity edges, regardless of relationship type name |
-| `df.cypher` | All DF edges (`[:DF]` or `[:DF_*]`), with `entityId` and `entityType` from edge properties |
-
-The viewer reads this bundle entirely in the browser — no further Neo4j access is needed at view time.
-
-### 3.5 What the viewer computes client-side
-
-The raw JSON bundle is a flat list of events and edges. The viewer's `store.js` transforms it into the data structures needed for rendering:
-
-- **Groups events by case entity** and by item entity, deriving case-level summaries. The viewer auto-detects which entity type is the "case" (appears once per case) and which is the "item" (appears multiple times), so these roles are dataset-agnostic — PurchaseOrder/PurchaseOrderItem in BPIC19, Member/Book in the library dataset, etc.
-- **Parses timestamps** into `Date` objects.
-- **Detects entity types** by cardinality: entities appearing once per case are classified as `caseType` (e.g. PurchaseOrder), entities appearing multiple times per case as `itemType` (e.g. PurchaseOrderItem).
-- **Builds an overview graph**: one node per case entity, edges weighted by shared activity sequences, used for community detection.
-- **Runs label-propagation community detection** to cluster POs by process behaviour similarity. Similarity is scored as: activity cosine similarity (48%) + resource Jaccard (18%) + context Jaccard (18%) + temporal overlap (10%) + size ratio (6%).
-- **Computes variant summaries**: groups item entities by their activity sequence fingerprint.
-
----
-
-## 4. Prerequisites & setup
-
-| Tool | Version |
-|------|---------|
-| Python | 3.10 or later |
-| Neo4j | 5.x with APOC plugin |
-| A modern browser | Chrome / Firefox / Edge |
-
-> **No Node.js required.** The viewer is plain ES modules served from any static file server.
-
-### Install Python dependencies
-
-```bash
-cd bep
+```powershell
 python -m venv .venv
-
-# Windows
-.venv\Scripts\activate
-# macOS / Linux
-source .venv/bin/activate
-
+.\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
 ```
 
-### Start Neo4j
+### 2. Check Neo4j configuration
 
-Using Docker:
-```bash
-docker run -p 7474:7474 -p 7687:7687 \
-    -e NEO4J_AUTH=neo4j/12345678 \
-    -e NEO4JLABS_PLUGINS='["apoc"]' \
-    neo4j:5
+The repository reads Neo4j settings from `config.yaml`.
+
+Current dataset entries:
+
+- `library` -> Neo4j database `library`
+- `bpic19` -> Neo4j database `bpic19`
+
+The helper script only verifies connectivity and inspects the default Neo4j database:
+
+```powershell
+python scripts\check_neo4j.py
 ```
 
-Or use Neo4j Desktop. Update credentials in `config.yaml` if they differ from the defaults.
+That is useful as a connection check, but the actual build and export commands use the dataset-specific database configured under `datasets.<name>.database`.
 
-### Verify the connection
+### 3. Build and export the library dataset
 
-```bash
-python scripts/check_neo4j.py
-```
+This is the recommended first run.
 
-Expected: Neo4j version and node counts printed without errors.
-
----
-
-## 5. Running the pipeline
-
-### Library dataset (included, good for testing)
-
-```bash
-# Build the EKG (wipes the 'library' database and rebuilds)
+```powershell
 python -m pipeline.build_ekg --dataset library --yes
-
-# Export to JSON
 python -m pipeline.export_json --dataset library --output output/library.json
 ```
 
-### BPIC19 dataset
+### 4. Build and export the BPIC19 prototype bundle
 
-Place the raw CSV at `data/raw/bpic19/BPI_Challenge_2019.csv`, then:
+Build the full BPIC19 EKG in Neo4j:
 
-```bash
-# Test with a small sample first (20 PO items)
-python -m pipeline.build_ekg --dataset bpic19 --sample
-
-# Full build (may take several minutes)
+```powershell
 python -m pipeline.build_ekg --dataset bpic19 --yes
-
-# Export
-python -m pipeline.export_json --dataset bpic19 --output output/bpic19.json
 ```
 
-### CLI reference
+Then export a viewer-sized sampled bundle:
 
-**`build_ekg.py`**
+```powershell
+python -m pipeline.export_json --dataset bpic19 --output output/bpic19.json --sample-cases 720 --max-case-events 160
+```
 
-| Flag | Description |
-|------|-------------|
-| `--dataset <name>` | Dataset key from `config.yaml` (required) |
-| `--sample` | Import only the case IDs listed in the `samples` field of the dataset description |
-| `--yes` | Skip the confirmation prompt |
+This is the intended BPIC19 prototype workflow. It keeps the graph construction faithful in Neo4j while producing a browser-manageable JSON bundle.
 
-**`export_json.py`**
+If you need a full JSON export for offline processing, you can export to another filename, but that full bundle is not intended for direct use in the browser prototype.
 
-| Flag | Description |
-|------|-------------|
-| `--dataset <name>` | Dataset key from `config.yaml` (required) |
-| `--output <path>` | Output path for the JSON bundle (required) |
+### 5. Start the viewer
 
----
+Serve from the repository root so the viewer can load `output/*.json`:
 
-## 6. Using the viewer
-
-Serve the repo from the `bep/` directory and open a browser:
-
-```bash
-# From bep/
+```powershell
 python -m http.server 8000
 ```
 
-| URL | Dataset loaded |
-|-----|---------------|
-| `http://localhost:8000/viewer/` | `library` (default) |
-| `http://localhost:8000/viewer/?dataset=bpic19` | BPIC19 |
+Then open:
 
-### Navigation
+- `http://localhost:8000/viewer/?dataset=library`
+- `http://localhost:8000/viewer/?dataset=bpic19`
 
-```
-Overview
-  └─ Community list (left sidebar)
-       └─ Click a community → Community view (filtered case list)
-            └─ Click a case  → Detail view (per-item timeline + case stats)
-                 └─ Back button → returns one level up
-```
+If you open `http://localhost:8000/viewer/` with no query parameter, the viewer defaults to `library`.
 
-### Sidebar controls
+## Fastest Evaluation Path
 
-| Control | Effect |
-|---------|--------|
-| Overview / Variants | Switch top-level view |
-| ← Back | Go up one navigation level |
-| Fit / Reset zoom | Camera controls |
-| Deviants only | Show only items whose activity sequence deviates from the most common variant |
-| Sync only | Show only synchronisation events (events correlated to multiple entity types) |
-| Max items slider | Limit how many items are rendered per case in detail view |
-| DF Item / DF Case / CORR | Toggle edge layers and their opacity |
-| Resources | Show/hide resource satellite nodes |
-| Sync events | Dim events that appear on only one entity timeline |
-| Bottlenecks | Highlight edges where waiting time is above average |
+If the JSON bundles already exist and you only want to inspect the prototype:
 
----
-
-## 7. Datasets
-
-| Key | Description | Source |
-|-----|-------------|--------|
-| `library` | Small library loan process (synthetic) | Included in `data/raw/` |
-| `bpic19` | BPI Challenge 2019 — purchase order handling (500k events) | [4TU.ResearchData](https://doi.org/10.4121/uuid:d06aff4b-79f0-45e6-8ec8-e19730c248f1) |
-| `bpic17` | BPI Challenge 2017 — loan applications | 4TU.ResearchData |
-| `bpic14` | BPI Challenge 2014 — incident management | 4TU.ResearchData |
-
-All BPI datasets must be downloaded separately and placed in `data/raw/`.
-
----
-
-## 8. Project layout
-
-```
-bep/
-├── config.yaml                        # Neo4j credentials + dataset paths
-├── requirements.txt
-├── data/
-│   ├── raw/                           # Input CSV / XES files (not in git)
-│   └── semantic_headers/
-│       ├── library.json               # Semantic header
-│       ├── library_DS.json            # Dataset description
-│       ├── bpic19.json
-│       └── bpic19_DS.json
-├── output/                            # Exported JSON bundles (not in git)
-├── pipeline/
-│   ├── build_ekg.py                   # Stage 1+2: ingest + EKG construction
-│   ├── export_json.py                 # Stage 3: Neo4j → JSON bundle
-│   ├── config_loader.py               # Reads config.yaml
-│   └── cypher/
-│       ├── events.cypher
-│       ├── entities.cypher
-│       ├── corr.cypher
-│       └── df.cypher
-├── scripts/
-│   └── check_neo4j.py                 # Connectivity check helper
-├── viewer/
-│   ├── index.html
-│   ├── style.css
-│   └── src/
-│       ├── main.js                    # Entry point, state management
-│       ├── data/
-│       │   ├── loader.js              # Fetch + parse JSON bundle
-│       │   └── store.js              # Client-side graph model + community detection
-│       ├── layout/
-│       │   ├── detailLayout.js        # Per-case timeline layout algorithm
-│       │   └── overviewLayout.js      # Overview network + variant layout
-│       └── render/
-│           ├── detailRender.js        # SVG rendering for detail view
-│           ├── overviewRender.js      # SVG rendering for overview/community view
-│           └── shared.js             # Markers, zoom helpers, colour palette
-└── docs/
-    └── PIPELINE.md                    # JSON bundle schema reference
+```powershell
+.\.venv\Scripts\Activate.ps1
+python -m http.server 8000
 ```
 
----
+Then open the dataset URL directly.
 
-## 9. Configuration reference
+## End-to-End Project Flow
 
-`config.yaml` has two sections:
+The project has four stages.
 
-```yaml
-neo4j:
-  uri:              neo4j://127.0.0.1:7687
-  user:             neo4j
-  password:         <your password>
-  default_database: neo4j
+### Stage 1. Dataset description and semantic modeling
 
-datasets:
-  <key>:
-    raw_data:           data/raw/<file or directory>
-    semantic_header:    data/semantic_headers/<key>.json
-    dataset_description: data/semantic_headers/<key>_DS.json
-    database:           <neo4j database name>
+The actual EKG semantics are declared in `data/semantic_headers/`.
+
+Each supported dataset has two files:
+
+- `<dataset>.json`
+  Semantic header that defines records, entity construction, inferred correlations, DF inference, and structural relations.
+- `<dataset>_DS.json`
+  Dataset description used by PromG to locate files, parse timestamps, and map raw columns into record attributes.
+
+This keeps the graph model dataset-driven rather than hardcoding entity logic in Python.
+
+### Stage 2. EKG build in Neo4j
+
+`pipeline/build_ekg.py` orchestrates PromG:
+
+1. load `config.yaml`,
+2. resolve dataset paths,
+3. create a temporary working directory,
+4. mirror the expected data paths for PromG,
+5. connect to the dataset-specific Neo4j database,
+6. clear the database,
+7. import raw records,
+8. create event and entity nodes,
+9. create structural entity relations,
+10. infer DF edges where the semantic header requests them.
+
+Important command:
+
+```powershell
+python -m pipeline.build_ekg --dataset <name> [--sample] [--yes]
 ```
 
-Each `<key>` becomes the value you pass to `--dataset` and the URL parameter `?dataset=`.
+Notes:
 
----
+- `--sample` is PromG sample mode, driven by the dataset description.
+- `--yes` skips the destructive rebuild confirmation.
 
-## 10. Troubleshooting
+### Stage 3. Typed JSON export
 
-**`UnicodeDecodeError` when importing CSV**
-Add `"encoding": "cp1252"` to the dataset description JSON. BPIC19 uses Windows-1252 encoding.
+`pipeline/export_json.py` exports the graph to the stable viewer bundle.
 
-**Timestamp parse error (`DateTimeParseException`)**
-The `datetime_object.format` string in the dataset description must match the actual format in the CSV. Use Java `DateTimeFormatter` pattern syntax (e.g. `"d-M-y H:m:s.SSS"` for `26-01-2019 08:14:00.000`).
+The bundle contains:
 
-**`export_json` reports `df: 0`**
-PromG may store DF edges as typed relationships (`DF_PURCHASEORDER`, `DF_HUMANRESOURCE`, …) rather than a generic `DF`. The `df.cypher` query matches both: `WHERE type(df) = 'DF' OR type(df) STARTS WITH 'DF_'`.
+- `events`
+- `entities`
+- `corr`
+- `df`
+- `relations`
 
-**Sample filter matches 0 rows**
-The `samples.ids` values in the dataset description must exactly match values in the `population_column` of the CSV. Check actual case ID format with:
-```bash
-python -c "import pandas as pd; df=pd.read_csv('data/raw/bpic19/BPI_Challenge_2019.csv', encoding='cp1252', nrows=3); print(df['case concept:name'].tolist())"
+The export preserves:
+
+- stable entity IDs,
+- `primary_type` and `labels` for entities,
+- relation types on `corr`,
+- entity ownership on `df`,
+- non-event structural entity relations.
+
+Important command:
+
+```powershell
+python -m pipeline.export_json --dataset <name> --output output/<name>.json
 ```
 
-**Viewer shows dropzone instead of graph**
-- Run `export_json.py` first — the JSON bundle must exist.
-- Serve over HTTP, not `file://` (ES modules require CORS headers).
-- Check the dataset key in the URL matches the filename in `output/`.
+For large datasets:
 
-**Neo4j connection refused**
-Confirm Neo4j is running and the bolt port (default 7687) is accessible. Docker users: ensure the container is started and `-p 7687:7687` is mapped.
+```powershell
+python -m pipeline.export_json --dataset bpic19 --output output/bpic19.json --sample-cases 720 --max-case-events 160
+```
+
+The full bundle schema is documented in [docs/PIPELINE.md](docs/PIPELINE.md).
+
+### Stage 4. Browser-side analysis and rendering
+
+The viewer is a static D3 application with no Node build step.
+
+At load time it:
+
+1. fetches the JSON bundle,
+2. builds an in-memory store,
+3. derives analytical structures,
+4. computes layout geometry,
+5. renders SVG and interactive sidebar panels.
+
+The main analytical frontend files are:
+
+- [viewer/src/data/store.js](viewer/src/data/store.js)
+- [viewer/src/layout/detailLayout.js](viewer/src/layout/detailLayout.js)
+- [viewer/src/layout/overviewLayout.js](viewer/src/layout/overviewLayout.js)
+
+## Prototype Views
+
+### Overview and community view
+
+The overview is case-oriented.
+
+It:
+
+- summarizes each case,
+- computes pairwise case similarity,
+- sparsifies the graph with k-nearest-neighbor retention,
+- groups cases into communities through weighted label propagation,
+- lays communities out deterministically,
+- allows drill-down into one community and then into one case.
+
+This view answers:
+
+- which cases behave similarly,
+- how the dataset splits into behavioral regions,
+- which communities deserve detailed inspection.
+
+### Variants view
+
+The variants view is item-oriented.
+
+It:
+
+- reconstructs item-level traces,
+- groups identical sequences into variants,
+- ranks them by frequency,
+- shows a lower activity transition graph,
+- exposes variant-level statistics in the sidebar,
+- lists the members and items that belong to a selected variant.
+
+This is where the prototype now places dominant behavior analysis.
+
+### Detail view
+
+The detail view is the main multi-entity inspection surface.
+
+It opens from a selected entity and builds a local typed slice around that entity.
+
+Depending on the anchor type, the scope is specialized:
+
+- case/member anchor -> overlap-only case focus,
+- item/book anchor -> overlap-only item focus,
+- generic anchor -> local neighborhood.
+
+The sidebar changes dynamically in detail mode and includes:
+
+- shared-only filtering,
+- max entities per type,
+- visible entity-type toggles,
+- edge-layer toggles,
+- shared-event hotspot list,
+- cluster-specific activity filtering for mixed shared-event clusters.
+
+## Layout Algorithms
+
+This is the core contribution of the prototype.
+
+### Overview layout
+
+The overview combines an analytical graph model with a deterministic spatial layout.
+
+Analytical phase:
+
+- activity cosine similarity: 48%
+- resource Jaccard similarity: 18%
+- context Jaccard similarity: 18%
+- temporal similarity: 10%
+- size similarity: 6%
+
+Then:
+
+- only strong enough similarities are kept,
+- each case keeps only its local strongest neighbors,
+- weighted label propagation produces communities.
+
+Spatial phase:
+
+- communities are placed first,
+- community members are arranged inside their shells,
+- focused community mode exposes resources and attributes as side satellites.
+
+This avoids using an unconstrained force layout and produces a more stable analytical overview.
+
+### Variant layout
+
+The variant view reconstructs ordered item traces from DF edges, groups identical sequences, and renders:
+
+- a ranked list of variants,
+- a lower activity DF graph positioned by average activity position in the trace.
+
+This view supports thesis-level process comparison at the item lifecycle level.
+
+### Detail layout
+
+The detail layout is the most important algorithmic part of the repository.
+
+Its core rules are:
+
+1. One shared horizontal time axis.
+   All visible events are positioned on the same temporal scale, which keeps inter-entity coordination readable.
+
+2. One band per entity type.
+   The layout groups entities by type before placing individual lanes.
+
+3. One lane per entity instance.
+   Each visible entity gets its own DF path inside its type band.
+
+4. Event anchors are positioned once and reused.
+   Lanes, correlation links, and shared-event guides all reference the same anchor positions.
+
+5. Shared events are explicit.
+   Shared events are shown through vertical guides and a clustered shared-event rail at the top of the timeline instead of a flat pile of stacked nodes.
+
+6. Mixed shared clusters are explorable.
+   If a shared cluster contains multiple activities, clicking it opens a sidebar filter that lets the user restrict the current detail slice to one event type from that cluster.
+
+7. Structural relations remain available.
+   Entity-to-entity relations can be rendered as a separate layer alongside DF and correlation structure.
+
+8. Bottlenecks are local.
+   Visible DF gaps are measured and the upper quartile threshold is used to mark unusually long waits in the current slice.
+
+9. The time scale is robust to outliers.
+   Extreme timestamps can trigger a clipped robust range so that one bad outlier does not collapse the entire view into a vertical strip.
+
+In the current implementation, the detail view is therefore not just a per-case list of traces. It is a typed EKG slice with synchronized time, cross-entity shared-event signaling, and dynamic filtering.
+
+## Interaction Model
+
+The prototype is designed as a drill-down workflow:
+
+1. start in overview,
+2. inspect a community,
+3. open a case or item,
+4. inspect the multi-entity detail slice,
+5. use the back button to return to the originating view.
+
+The sidebar is view-aware:
+
+- overview/community -> summary of communities and cases,
+- variants -> variant statistics and member/item membership,
+- detail -> detail summary, filters, hotspots, legend, and cluster activity controls.
+
+The canvas is also keyboard navigable:
+
+- arrows or `WASD` to pan,
+- `+` and `-` to zoom,
+- `F` to fit,
+- `0` to reset.
+
+## What To Read In The Code
+
+If you want to understand the repository quickly, read these files in order:
+
+1. [pipeline/build_ekg.py](pipeline/build_ekg.py)
+2. [pipeline/export_json.py](pipeline/export_json.py)
+3. [viewer/src/data/store.js](viewer/src/data/store.js)
+4. [viewer/src/layout/detailLayout.js](viewer/src/layout/detailLayout.js)
+5. [viewer/src/layout/overviewLayout.js](viewer/src/layout/overviewLayout.js)
+6. [viewer/src/render/detailRender.js](viewer/src/render/detailRender.js)
+7. [viewer/src/render/overviewRender.js](viewer/src/render/overviewRender.js)
+
+That sequence matches the actual data flow from raw records to visual layout.
+
+## Current Constraints
+
+- Supported end-to-end datasets in the repository: `library`, `bpic19`
+- BPIC19 should be viewed through a sampled export, not the full browser bundle
+- `scripts/check_neo4j.py` checks connectivity against the default database, not a dataset database
+- The viewer is static and browser-only; it does not query Neo4j directly at runtime
+
+## Summary
+
+This repository is a full prototype pipeline for thesis-driven EKG analysis:
+
+- semantic dataset descriptions define the graph,
+- PromG builds the EKG in Neo4j,
+- Python exports a typed JSON bundle,
+- the browser reconstructs analytical structure and computes the layouts,
+- overview, variants, and detail views support different levels of process understanding.
+
+The main technical focus is the layout stack, especially the detail view: typed entity bands, a shared timeline, clustered shared-event rendering, per-entity DF structure, and interactive filtering for mixed shared-event clusters.

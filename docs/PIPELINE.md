@@ -114,12 +114,15 @@ python -m pipeline.build_ekg --dataset <name> [--sample N] [--yes]
 
 ```bash
 python -m pipeline.export_json --dataset <name> --output output/<name>.json
+python -m pipeline.export_json --dataset bpic19 --output output/bpic19.json --sample-cases 720 --max-case-events 160
 ```
 
 | Flag | Description |
 |------|-------------|
 | `--dataset` | Dataset key from `config.yaml` (required) |
 | `--output` | Output path for the JSON bundle (required) |
+| `--sample-cases` | Export a case-sampled subset instead of the full dataset |
+| `--max-case-events` | Ignore very large cases when sampling to keep viewer bundles manageable |
 
 **What it does:**
 
@@ -130,6 +133,8 @@ python -m pipeline.export_json --dataset <name> --output output/<name>.json
 5. Validates ID uniqueness and referential integrity.
 6. Fails export if DF edges cannot be resolved to an owning entity.
 7. Writes the JSON bundle.
+
+For large datasets such as `bpic19`, the full JSON export is too large for this prototype's browser-only viewer. Use `--sample-cases` to create a viewer-sized subset bundle.
 
 **Cypher queries:**
 
