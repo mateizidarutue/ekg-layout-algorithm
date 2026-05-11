@@ -17,51 +17,47 @@
         <span id="panel-view-tag" class="view-tag">OVERVIEW</span>
       </header>
 
-      <!-- View controls -->
-      <div class="ctrl-group">
-        <div class="ctrl-row" style="margin-bottom:6px">
-          <button id="btn-overview" class="btn btn-primary active">Overview</button>
-          <button id="btn-variants" class="btn btn-primary">Variants</button>
+      <!-- Home / about (home route only) -->
+      <div class="ctrl-group home-only">
+        <div class="ctrl-label section-label">About</div>
+        <div class="ctrl-hint" style="line-height:1.6">
+          This viewer aligns four analytical tasks from Munzner (2014) with
+          canonical OCPM tasks. Select a task card on the home screen to begin.
         </div>
-        <button id="btn-back" class="btn btn-sm btn-back">&lt;- Back to overview</button>
       </div>
 
-      <!-- Camera -->
-      <div class="ctrl-group">
-        <div class="ctrl-row">
-          <button id="btn-fit" class="btn btn-sm">Fit</button>
-          <button id="btn-reset-zoom" class="btn btn-sm">Reset zoom</button>
-        </div>
-        <div class="ctrl-hint">Pan: drag or arrow keys/WASD. Zoom: wheel or +/- . Fit: F. Reset: 0.</div>
+      <!-- Camera hint (all routes except home) -->
+      <div class="ctrl-group non-home-only" style="padding:8px 12px">
+        <div class="ctrl-hint">Pan: drag or WASD/arrows · Zoom: wheel or +/- · Fit: F · Reset: 0</div>
       </div>
 
-      <!-- Overview/community summary -->
-      <div class="ctrl-group overview-community-only" id="overview-summary-panel">
+      <!-- Overview/community summary (summarize route) -->
+      <div class="ctrl-group summarize-only" id="overview-summary-panel">
         <div class="ctrl-label section-label" id="overview-summary-title">Overview Summary</div>
         <div id="overview-summary-content"></div>
       </div>
 
-      <!-- Detail filters -->
-      <div class="ctrl-group detail-only">
-        <button id="btn-shared-only" class="btn btn-sm btn-toggle">Shared events only</button>
+      <!-- Detail filters (identify + compare routes) -->
+      <div class="ctrl-group identify-compare-only">
+        <button id="btn-shared-only" type="button" class="btn btn-sm btn-toggle">Shared events only</button>
       </div>
 
-      <!-- Max entities slider -->
-      <div class="ctrl-group detail-only">
+      <!-- Max entities slider (identify + compare routes) -->
+      <div class="ctrl-group identify-compare-only">
         <label class="ctrl-label">Max entities per type
           <span id="slider-max-entities-val" class="ctrl-val">-</span>
         </label>
         <input id="slider-max-entities" type="range" min="1" max="1" value="1" class="slider" />
       </div>
 
-      <!-- Typed entity filters -->
-      <div class="ctrl-group detail-only">
+      <!-- Typed entity filters (identify + compare routes) -->
+      <div class="ctrl-group identify-compare-only">
         <div class="ctrl-label section-label">Visible entity types</div>
         <div id="entity-type-list"></div>
       </div>
 
-      <!-- Edge visibility (not in variants) -->
-      <div class="ctrl-group detail-only">
+      <!-- Edge visibility (identify + compare routes) -->
+      <div class="ctrl-group identify-compare-only">
         <div class="ctrl-label section-label">Edge layers</div>
         <label class="toggle-row">
           <input id="toggle-df" type="checkbox" checked />
@@ -85,67 +81,80 @@
           <input id="toggle-sync" type="checkbox" checked />
           Shared-event guides
         </label>
-        <label class="toggle-row detail-only">
+        <label class="toggle-row">
           <input id="toggle-bottleneck" type="checkbox" checked />
           Bottlenecks
         </label>
       </div>
 
-      <!-- Detail summary -->
-      <div class="ctrl-group detail-only" id="detail-summary-panel">
+      <!-- Detail summary (identify route) -->
+      <div class="ctrl-group identify-only" id="detail-summary-panel">
         <div class="ctrl-label section-label" id="detail-summary-title">Analysis Summary</div>
         <div id="detail-summary-content"></div>
       </div>
 
-      <!-- Variant summary -->
-      <div class="ctrl-group variants-only" id="variant-summary-panel">
+      <!-- Variant summary (compare route) -->
+      <div class="ctrl-group compare-variants-only" id="variant-summary-panel">
         <div class="ctrl-label section-label" id="variant-summary-title">Variant Summary</div>
         <div id="variant-summary-content"></div>
       </div>
 
-      <!-- Entity navigator -->
+      <!-- Compare strip (compare route, compare mode) -->
+      <div class="ctrl-group compare-mode-only" id="compare-strip-panel">
+        <div class="ctrl-label section-label">Compared entities</div>
+        <div id="compare-strip-list"></div>
+        <button id="btn-add-compare-entity" type="button" class="btn btn-sm" style="margin-top:8px">+ Add entity</button>
+      </div>
+
+      <!-- Explore hotspot summary (explore drilled route) -->
+      <div class="ctrl-group explore-drilled-only" id="hotspot-summary-panel">
+        <div class="ctrl-label section-label">Hotspot</div>
+        <div id="hotspot-summary-content"></div>
+      </div>
+
+      <!-- Entity navigator (non-home, non-compare-variants) -->
       <div class="ctrl-group entity-section nav-entities">
         <div class="ctrl-label section-label" id="entity-list-label">Entities</div>
         <input id="entity-search" type="text" placeholder="Search..." class="search-input" />
         <div id="entity-list" class="entity-list"></div>
       </div>
 
-      <!-- Variant items -->
-      <div class="ctrl-group variants-only">
+      <!-- Variant items (compare variants mode) -->
+      <div class="ctrl-group compare-variants-only">
         <div class="ctrl-label section-label" id="variant-item-list-label">Books in variant</div>
         <div id="variant-item-list" class="entity-list"></div>
       </div>
 
-      <!-- Variant members -->
-      <div class="ctrl-group variants-only">
+      <!-- Variant members (compare variants mode) -->
+      <div class="ctrl-group compare-variants-only">
         <div class="ctrl-label section-label" id="variant-member-list-label">Members in variant</div>
         <div id="variant-member-list" class="entity-list"></div>
       </div>
 
-      <!-- Shared events -->
-      <div class="ctrl-group detail-only">
+      <!-- Shared events (identify + compare routes) -->
+      <div class="ctrl-group identify-compare-only">
         <div class="ctrl-label section-label">Shared-event hotspots</div>
         <div id="shared-event-list" class="shared-event-list"></div>
       </div>
 
       <!-- Shared cluster activity filter -->
-      <div class="ctrl-group detail-only hidden" id="cluster-activity-panel">
+      <div class="ctrl-group identify-compare-only hidden" id="cluster-activity-panel">
         <div class="ctrl-label section-label" id="cluster-activity-title">Cluster event types</div>
         <div id="cluster-activity-content"></div>
       </div>
 
-      <!-- Legend -->
-      <div class="ctrl-group detail-only">
+      <!-- Legend (identify + compare routes) -->
+      <div class="ctrl-group identify-compare-only">
         <div class="ctrl-label section-label">Legend</div>
         <div id="legend-content" class="legend-content"></div>
       </div>
 
-      <!-- Activity filter -->
+      <!-- Activity filter (all routes) -->
       <div class="ctrl-group act-section">
         <div class="ctrl-label section-label">
           Activities
-          <button id="btn-act-all" class="btn btn-xs">All</button>
-          <button id="btn-act-none" class="btn btn-xs">None</button>
+          <button id="btn-act-all" type="button" class="btn btn-xs">All</button>
+          <button id="btn-act-none" type="button" class="btn btn-xs">None</button>
         </div>
         <div id="activity-list" class="activity-list"></div>
       </div>
@@ -163,8 +172,36 @@
 
     <!-- ── Canvas area ── -->
     <main class="canvas-area">
+
+      <!-- ── Top bar ── -->
+      <div id="topbar">
+        <div class="topbar-left">
+          <button id="btn-home" type="button" class="topbar-btn topbar-home" aria-label="Home">
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+              <path d="M2 6.5L8 2l6 4.5V14a1 1 0 01-1 1H3a1 1 0 01-1-1V6.5z" stroke="currentColor" stroke-width="1.4" fill="none"/>
+              <path d="M6 15v-5h4v5" stroke="currentColor" stroke-width="1.4"/>
+            </svg>
+          </button>
+          <div id="topbar-breadcrumb" class="topbar-breadcrumb">
+            <span class="breadcrumb-chip" id="breadcrumb-task"></span>
+            <span class="breadcrumb-sep" id="breadcrumb-sep" aria-hidden="true">·</span>
+            <span class="breadcrumb-ctx" id="breadcrumb-ctx"></span>
+          </div>
+        </div>
+        <div class="topbar-right">
+          <span id="topbar-dataset-name" class="topbar-dataset-name"></span>
+          <button id="btn-switch-dataset" type="button" class="topbar-btn">Switch dataset</button>
+          <button id="btn-fit" type="button" class="topbar-btn" aria-label="Fit view">Fit</button>
+          <button id="btn-reset-zoom" type="button" class="topbar-btn" aria-label="Reset zoom">Reset zoom</button>
+        </div>
+      </div>
+
+      <!-- ── Canvas wrap ── -->
       <div id="canvas-wrap" class="canvas-wrap" tabindex="0" aria-label="Graph canvas. Use arrow keys or WASD to pan, plus and minus to zoom, 0 to reset, and F to fit.">
         <svg id="canvas" class="canvas"></svg>
+
+        <!-- DOM screen host (home, explore list) -->
+        <div id="screen-host" class="screen-host hidden"></div>
 
         <!-- Tooltip -->
         <div id="tooltip" class="tooltip"></div>
@@ -180,12 +217,27 @@
           <div class="dropzone-inner">
             <p>No dataset found.</p>
             <p class="dropzone-hint">Open a JSON bundle exported by the pipeline:</p>
-            <button id="btn-open-file" class="btn btn-primary">Open file...</button>
+            <button id="btn-open-file" type="button" class="btn btn-primary">Open file...</button>
             <input id="file-input" type="file" accept=".json" class="hidden" />
           </div>
         </div>
       </div>
     </main>
+
+    <!-- Dataset switcher modal -->
+    <div id="dataset-modal" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-label="Switch dataset">
+      <div class="modal-card">
+        <div class="modal-header">
+          <span class="modal-title">Switch dataset</span>
+          <button id="btn-modal-close" type="button" class="modal-close" aria-label="Close">✕</button>
+        </div>
+        <div id="dataset-modal-list" class="modal-list"></div>
+        <div class="modal-footer">
+          <button id="btn-modal-open-file" type="button" class="btn btn-sm">Open local JSON file…</button>
+          <input id="file-input-modal" type="file" accept=".json" class="hidden" />
+        </div>
+      </div>
+    </div>
 
   </div>
 

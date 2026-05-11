@@ -6,9 +6,49 @@ It contains:
 
 - a Python pipeline that builds typed EKGs in Neo4j through PromG,
 - a JSON export layer that turns the graph into a viewer bundle,
-- a browser-based prototype that supports overview, variant, and multi-entity detail analysis.
+- a browser-based prototype that aligns four analytical tasks from Munzner (2014) with canonical OCPM tasks.
 
 The repository is organized around one core idea: flat case-centric process views are not enough for object-centric processes such as purchase orders with items, or members borrowing multiple books. The prototype therefore treats an execution as a typed graph of interacting entities and visualizes it with layouts that preserve both time and cross-entity structure.
+
+## Four-Task Screen Architecture
+
+The viewer organises analysis around four task cards derived from Munzner (2014):
+
+| Task | Route | Munzner tuple | Purpose |
+|---|---|---|---|
+| T1 Lifecycle | `#/identify` | ⟨Identify, Path⟩ | Open one entity and read its full lifecycle on the shared time axis, including bottleneck waits. |
+| T2 Variants & Comparison | `#/compare` | ⟨Compare, Paths⟩ | Group entities by behaviour into variants, then place multiple lifelines on the same canvas. |
+| T3 Process Overview | `#/summarize` | ⟨Summarize, Topology⟩ | See how the dataset partitions into behavioural communities and identify outlier groups. |
+| T4 Shared Events | `#/explore` | ⟨Explore, Features⟩ | Find shared events where multiple entity lifecycles intersect. |
+
+### Hash-based navigation
+
+The viewer uses hash-based routing. Every view state is a stable, shareable URL:
+
+```
+http://localhost:8000/viewer/#/home
+http://localhost:8000/viewer/#/identify?entity=<id>
+http://localhost:8000/viewer/#/compare?entities=<id1>,<id2>
+http://localhost:8000/viewer/#/summarize?community=<id>
+http://localhost:8000/viewer/#/explore?hotspot=<activity>
+```
+
+Opening the viewer at `http://localhost:8000/viewer/` redirects to `#/home`, where the four task cards are shown.
+
+### Adding a dataset
+
+Datasets are declared in `output/manifest.json`:
+
+```json
+{
+  "datasets": [
+    { "name": "library", "label": "Library",             "file": "library.json" },
+    { "name": "bpic19",  "label": "BPIC 2019 (sampled)", "file": "bpic19.json"  }
+  ]
+}
+```
+
+To add a new dataset, export a JSON bundle with the pipeline and add a new entry to `manifest.json`. The viewer loads the manifest on startup and populates the "Switch dataset" modal automatically. No viewer code needs to change.
 
 ## Thesis Alignment
 
@@ -19,8 +59,8 @@ The current implementation aligns with that goal in three ways:
 1. It builds a typed EKG, not a flat log.
    Events, entities, correlations, directly-follows edges, and structural entity-to-entity relations are all preserved.
 
-2. It separates analysis into three coordinated views.
-   The overview shows communities of similar cases, the variant view focuses on dominant item-level behavior, and the detail view shows a local multi-entity slice around one selected entity.
+2. It separates analysis into four coordinated screens.
+   The overview shows communities of similar cases, the variant view focuses on dominant item-level behaviour, the detail view shows a local multi-entity slice around one selected entity, and the shared-events screen surfaces synchronisation hotspots across entity types.
 
 3. It emphasizes the layout requirements from the thesis.
    The detail view uses one horizontal time axis, one band per entity type, one lane per entity instance, explicit shared-event guides, clustered shared-event markers at the top, and optional DF and structural relation layers.
@@ -66,6 +106,7 @@ bep/
 |       |-- bpic19.json
 |       `-- bpic19_DS.json
 |-- output/
+|   `-- manifest.json          <- dataset registry (add new datasets here)
 |-- pipeline/
 |   |-- build_ekg.py
 |   |-- export_json.py
@@ -82,17 +123,23 @@ bep/
     |-- index.html
     |-- style.css
     `-- src/
-        |-- main.js
+        |-- main.js            <- central route dispatcher
+        |-- router.js          <- hash-based SPA router
         |-- data/
+        |   |-- entityTypes.js <- dataset-agnostic entity-type registry
         |   |-- loader.js
         |   `-- store.js
         |-- layout/
         |   |-- detailLayout.js
         |   `-- overviewLayout.js
-        `-- render/
-            |-- detailRender.js
-            |-- overviewRender.js
-            `-- shared.js
+        |-- render/
+        |   |-- detailRender.js
+        |   |-- overviewRender.js
+        |   `-- shared.js
+        `-- screens/
+            |-- home.js        <- T0 home screen with task cards
+            |-- explore.js     <- T4 shared-events hotspot list
+            `-- sidebar.js     <- route-aware sidebar / topbar updater
 ```
 
 Read this structure from top to bottom:
@@ -171,10 +218,21 @@ python -m http.server 8000
 
 Then open:
 
-- `http://localhost:8000/viewer/?dataset=library`
-- `http://localhost:8000/viewer/?dataset=bpic19`
+```
+http://localhost:8000/viewer/
+```
 
-If you open `http://localhost:8000/viewer/` with no query parameter, the viewer defaults to `library`.
+The viewer loads `output/manifest.json`, shows the home screen with dataset statistics and the four task cards, and lets you switch datasets at any time via the "Switch dataset" button.
+
+You can also deep-link into a specific dataset and route:
+
+```
+http://localhost:8000/viewer/#/home
+http://localhost:8000/viewer/#/identify?entity=<id>
+http://localhost:8000/viewer/#/compare?entities=<id1>,<id2>
+http://localhost:8000/viewer/#/summarize
+http://localhost:8000/viewer/#/explore
+```
 
 ## Fastest Evaluation Path
 
@@ -185,7 +243,7 @@ If the JSON bundles already exist and you only want to inspect the prototype:
 python -m http.server 8000
 ```
 
-Then open the dataset URL directly.
+Then open `http://localhost:8000/viewer/`. The home screen will show dataset statistics and the four task cards. Click a card to enter that screen.
 
 ## End-to-End Project Flow
 
@@ -284,60 +342,52 @@ The main analytical frontend files are:
 
 ## Prototype Views
 
-### Overview and community view
+### T1 – Lifecycle (`#/identify`)
 
-The overview is case-oriented.
+Opens one entity and renders its full multi-entity detail slice on a shared time axis.
 
-It:
+- Anchor entity's first and last events are marked with START / END glyphs.
+- Bottleneck DF edges are highlighted in amber.
+- Sidebar shows: shared-only filter, max-entities slider, entity-type toggles, edge-layer opacity controls, shared-event hotspot list, cluster activity filter, legend.
 
-- summarizes each case,
-- computes pairwise case similarity,
-- sparsifies the graph with k-nearest-neighbor retention,
-- groups cases into communities through weighted label propagation,
-- lays communities out deterministically,
-- allows drill-down into one community and then into one case.
+Depending on the anchor type, the scope is specialised:
 
-This view answers:
+- case/member anchor → overlap-only case focus,
+- item/book anchor → overlap-only item focus,
+- generic anchor → local neighbourhood.
 
-- which cases behave similarly,
-- how the dataset splits into behavioral regions,
-- which communities deserve detailed inspection.
+### T2 – Variants & Comparison (`#/compare`)
 
-### Variants view
+Two modes are available in this screen:
 
-The variants view is item-oriented.
+**Variants mode** (default):
+- Reconstructs item-level traces, groups identical sequences into variants, and ranks them by frequency.
+- A lower activity transition graph shows dominant paths.
+- Sidebar shows variant statistics, member list, and item list.
+- "Compare top N" button seeds the compare strip with the top variant members.
 
-It:
+**Compare mode** (entered via the compare strip or a deep-link with `?entities=...`):
+- Multiple entity lifelines are shown on the same canvas simultaneously.
+- Each entity gets an accent colour in the compare strip; its lane is highlighted on the canvas.
+- Entities can be added (by clicking any entity in the sidebar list) or removed via the strip's × button.
 
-- reconstructs item-level traces,
-- groups identical sequences into variants,
-- ranks them by frequency,
-- shows a lower activity transition graph,
-- exposes variant-level statistics in the sidebar,
-- lists the members and items that belong to a selected variant.
+### T3 – Process Overview (`#/summarize`)
 
-This is where the prototype now places dominant behavior analysis.
+Case-oriented overview of the whole dataset.
 
-### Detail view
+- Cases are grouped into communities through activity-cosine + resource-Jaccard + temporal similarity and weighted label propagation.
+- Communities are rendered as force-free shells; inter-community similarity edges connect them.
+- Clicking a community drills into it: individual case nodes appear inside the shell, non-member nodes and edges are soft-faded to 15 % opacity.
+- Focused mode shows resource and attribute satellites around the community.
+- Sidebar shows a community summary panel.
 
-The detail view is the main multi-entity inspection surface.
+### T4 – Shared Events (`#/explore`)
 
-It opens from a selected entity and builds a local typed slice around that entity.
+Surfaces synchronisation hotspots across entity types.
 
-Depending on the anchor type, the scope is specialized:
-
-- case/member anchor -> overlap-only case focus,
-- item/book anchor -> overlap-only item focus,
-- generic anchor -> local neighborhood.
-
-The sidebar changes dynamically in detail mode and includes:
-
-- shared-only filtering,
-- max entities per type,
-- visible entity-type toggles,
-- edge-layer toggles,
-- shared-event hotspot list,
-- cluster-specific activity filtering for mixed shared-event clusters.
+- The hotspot list shows all activities that appear in shared events, ranked by sync degree and entity-type diversity.
+- Clicking a hotspot deep-links into a detail view seeded with the most type-diverse entities for that activity.
+- Sidebar shows a hotspot summary panel with date range, entity type breakdown, and avg sync degree.
 
 ## Layout Algorithms
 
@@ -415,19 +465,24 @@ In the current implementation, the detail view is therefore not just a per-case 
 
 ## Interaction Model
 
-The prototype is designed as a drill-down workflow:
+The prototype is designed around the home screen as a starting point:
 
-1. start in overview,
-2. inspect a community,
-3. open a case or item,
-4. inspect the multi-entity detail slice,
-5. use the back button to return to the originating view.
+1. open `#/home` to see dataset statistics and pick a task card,
+2. navigate into any of the four screens,
+3. drill down via entity / community / variant selection,
+4. use the home button (top-left) to return to the home screen at any time,
+5. use the breadcrumb to track the current task and entity context.
 
-The sidebar is view-aware:
+The topbar is always visible and shows:
 
-- overview/community -> summary of communities and cases,
-- variants -> variant statistics and member/item membership,
-- detail -> detail summary, filters, hotspots, legend, and cluster activity controls.
+- a home button,
+- a breadcrumb chip with the current task (T1–T4) and context entity or community,
+- the active dataset name and a "Switch dataset" button,
+- Fit and Reset-zoom camera controls.
+
+The sidebar panels are route-aware: each panel is shown only on the routes where it is relevant. The sidebar can be resized by dragging its right edge.
+
+All view state is encoded in the URL hash, so browser back / forward navigation works correctly.
 
 The canvas is also keyboard navigable:
 
@@ -442,11 +497,14 @@ If you want to understand the repository quickly, read these files in order:
 
 1. [pipeline/build_ekg.py](pipeline/build_ekg.py)
 2. [pipeline/export_json.py](pipeline/export_json.py)
-3. [viewer/src/data/store.js](viewer/src/data/store.js)
-4. [viewer/src/layout/detailLayout.js](viewer/src/layout/detailLayout.js)
-5. [viewer/src/layout/overviewLayout.js](viewer/src/layout/overviewLayout.js)
-6. [viewer/src/render/detailRender.js](viewer/src/render/detailRender.js)
-7. [viewer/src/render/overviewRender.js](viewer/src/render/overviewRender.js)
+3. [viewer/src/data/store.js](viewer/src/data/store.js) — store build, variant/community analytics, shared-event hotspot exports
+4. [viewer/src/data/entityTypes.js](viewer/src/data/entityTypes.js) — dataset-agnostic role inference (case / item / resource / attribute)
+5. [viewer/src/router.js](viewer/src/router.js) — hash router
+6. [viewer/src/main.js](viewer/src/main.js) — central route dispatcher, screen wiring
+7. [viewer/src/layout/detailLayout.js](viewer/src/layout/detailLayout.js)
+8. [viewer/src/layout/overviewLayout.js](viewer/src/layout/overviewLayout.js)
+9. [viewer/src/render/detailRender.js](viewer/src/render/detailRender.js)
+10. [viewer/src/render/overviewRender.js](viewer/src/render/overviewRender.js)
 
 That sequence matches the actual data flow from raw records to visual layout.
 
@@ -464,7 +522,8 @@ This repository is a full prototype pipeline for thesis-driven EKG analysis:
 - semantic dataset descriptions define the graph,
 - PromG builds the EKG in Neo4j,
 - Python exports a typed JSON bundle,
+- `output/manifest.json` declares available datasets without touching viewer code,
 - the browser reconstructs analytical structure and computes the layouts,
-- overview, variants, and detail views support different levels of process understanding.
+- four task-aligned screens cover Lifecycle (T1), Variants & Comparison (T2), Process Overview (T3), and Shared Events (T4).
 
-The main technical focus is the layout stack, especially the detail view: typed entity bands, a shared timeline, clustered shared-event rendering, per-entity DF structure, and interactive filtering for mixed shared-event clusters.
+The main technical focus is the layout stack, especially the detail view: typed entity bands, a shared timeline, start/end lifecycle glyphs on the anchor entity, clustered shared-event rendering, per-entity DF structure, and interactive filtering for mixed shared-event clusters.

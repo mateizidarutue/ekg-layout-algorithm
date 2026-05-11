@@ -33,3 +33,26 @@ export function datasetFromQuery(fallback = "library") {
   const params = new URLSearchParams(window.location.search);
   return params.get("dataset") || fallback;
 }
+
+/**
+ * Build a ?dataset=<name> query string for use in navigation links.
+ */
+export function datasetQueryString(name) {
+  return `?dataset=${encodeURIComponent(name)}`;
+}
+
+/**
+ * Load the output/manifest.json listing available datasets.
+ * Returns { datasets: [] } on 404 or parse error.
+ */
+export async function loadManifest() {
+  try {
+    const path = window.location.pathname;
+    const base = (path.startsWith("/viewer/") || path === "/viewer") ? "/output" : "../output";
+    const response = await fetch(`${base}/manifest.json`);
+    if (!response.ok) return { datasets: [] };
+    return await response.json();
+  } catch {
+    return { datasets: [] };
+  }
+}

@@ -108,6 +108,8 @@ export function drawDetailView(layout, lBg, lMeta, lDfPo, lCorr, lRes, lDfItem, 
     .attr("stroke-width", 1.2)
     .attr("class", "event-anchor-core");
 
+  _drawLifecycleGlyphs(layout.anchorRail, lNodes);
+
   const clusterNodes = lNodes.selectAll(null).data(layout.sharedEventClusters).join("g")
     .attr("class", "event-cluster")
     .attr("data-event-ids", d => d.eventIds.join("|"))
@@ -411,6 +413,51 @@ function _laneTooltip(lane) {
 function _membershipTooltip(lane, anchor) {
   if (!anchor) return "";
   return `<div class="tip-title">${anchor.activity}</div><div class="tip-row">Entity: <b>${lane.entityLabel}</b></div><div class="tip-row">Type: <b>${lane.entityType}</b></div><div class="tip-row">Time: <b>${anchor.date?.toLocaleString() ?? "n/a"}</b></div><div class="tip-row">Shared entities: <b>${anchor.sharedEntityIds.join(", ")}</b></div>`;
+}
+
+function _drawLifecycleGlyphs(anchorRail, lNodes) {
+  if (!anchorRail || anchorRail.length === 0) return;
+  const sorted = [...anchorRail].sort((a, b) => a.x - b.x);
+  const first = sorted[0];
+  const last = sorted[sorted.length - 1];
+
+  const startG = lNodes.append("g")
+    .attr("class", "lifecycle-glyph lifecycle-glyph-start")
+    .attr("transform", `translate(${first.x},${first.y})`);
+  startG.append("circle")
+    .attr("r", first.r + 8)
+    .attr("fill", "none")
+    .attr("stroke", "rgba(34,197,94,0.56)")
+    .attr("stroke-width", 1.8)
+    .attr("stroke-dasharray", "3 2.5");
+  startG.append("text")
+    .attr("x", 0).attr("y", first.r + 18)
+    .attr("text-anchor", "middle")
+    .attr("font-family", "JetBrains Mono, monospace")
+    .attr("font-size", "8px").attr("font-weight", "700")
+    .attr("letter-spacing", "0.08em")
+    .attr("fill", "rgba(22,163,74,0.80)")
+    .text("START");
+
+  if (first === last) return;
+
+  const endG = lNodes.append("g")
+    .attr("class", "lifecycle-glyph lifecycle-glyph-end")
+    .attr("transform", `translate(${last.x},${last.y})`);
+  endG.append("circle")
+    .attr("r", last.r + 8)
+    .attr("fill", "none")
+    .attr("stroke", "rgba(239,68,68,0.48)")
+    .attr("stroke-width", 1.8)
+    .attr("stroke-dasharray", "3 2.5");
+  endG.append("text")
+    .attr("x", 0).attr("y", last.r + 18)
+    .attr("text-anchor", "middle")
+    .attr("font-family", "JetBrains Mono, monospace")
+    .attr("font-size", "8px").attr("font-weight", "700")
+    .attr("letter-spacing", "0.08em")
+    .attr("fill", "rgba(220,38,38,0.74)")
+    .text("END");
 }
 
 function _bandColor(type) {

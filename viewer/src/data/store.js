@@ -1,5 +1,7 @@
 "use strict";
 
+import { buildEntityTypeRegistry } from "./entityTypes.js";
+
 const ACTIVITY_PALETTE = [
   "#2563eb", "#7c3aed", "#ea580c", "#059669", "#dc2626",
   "#0891b2", "#ca8a04", "#db2777", "#4f46e5", "#0f766e",
@@ -14,10 +16,6 @@ const OVERVIEW_SIM_MIN = 0.34;
 const OVERVIEW_LABEL_ACTIVITY_COUNT = 2;
 const OVERVIEW_MAX_COMMON_SHARE = 0.8;
 const GENERIC_LABELS = new Set(["Entity", "Resource", "EntityAttribute"]);
-const DETAIL_TYPE_ORDER = {
-  library: ["Member", "Book", "Library", "SubscriptionAttribute"],
-  bpic19: ["PurchaseOrder", "PurchaseOrderItem", "Vendor", "Company", "Invoice", "HumanResource", "System", "Resource"],
-};
 
 let _store = null;
 const _overviewCache = new Map();
@@ -384,6 +382,7 @@ export function buildStore(bundle) {
     entityList: _buildEntityList(entities, maps.eventsByEntityId),
   };
 
+  _store.typeRegistry = buildEntityTypeRegistry(_store);
   return _store;
 }
 
@@ -903,6 +902,94 @@ export function getActivityCountsForEntity(entityId) {
   return _countBy(_store.eventsByEntityId[entityId] ?? [], event => event.activity);
 }
 
+export function getGlobalSharedEventHotspots({ activities = null, entityTypeFilter = null, sortBy = "frequency" } = {}) {
+  if (!_store) return [];
+  const byActivity = new Map();
+  _store.events.forEach(event => {
+    if (event.entity_ids.length < 2) return;
+    if (activities && !activities.has(event.activity)) return;
+    const types = [...new Set(event.memberships.map(m => m.entity_type))];
+    if (entityTypeFilter && !types.some(t => entityTypeFilter.has(t))) return;
+    if (!byActivity.has(event.activity)) {
+      byActivity.set(event.activity, { activity: event.activity, eventIds: [], entityIdSet: new Set(), typePairSet: new Set() });
+    }
+    const entry = byActivity.get(event.activity);
+    entry.eventIds.push(event.event_id);
+    event.entity_ids.forEach(id => entry.entityIdSet.add(id));
+    const sortedTypes = [...new Set(types)].sort();
+    for (let i = 0; i < sortedTypes.length; i++) {
+      for (let j = i + 1; j < sortedTypes.length; j++) {
+        entry.typePairSet.add(`${sortedTypes[i]}→${sortedTypes[j]}`);
+      }
+    }
+  });
+
+  const hotspots = [...byActivity.values()].map(entry => {
+    const eventObjects = entry.eventIds.map(id => _store.eventById[id]).filter(Boolean);
+    const avgSyncDegree = eventObjects.reduce((sum, e) => sum + e.entity_ids.length, 0) / Math.max(eventObjects.length, 1);
+    const dates = eventObjects.map(e => e.date?.getTime()).filter(Number.isFinite);
+    const types = [...new Set(eventObjects.flatMap(e => e.memberships.map(m => m.entity_type)))];
+    return {
+      id: `act:${entry.activity}`,
+      activity: entry.activity,
+      color: _store.activityColorByName[entry.activity] ?? "#64748b",
+      eventIds: entry.eventIds,
+      eventCount: entry.eventIds.length,
+      entityCount: entry.entityIdSet.size,
+      entityTypes: types,
+      typePairs: [...entry.typePairSet].sort(),
+      avgSyncDegree,
+      firstDate: dates.length ? new Date(Math.min(...dates)) : null,
+      lastDate:  dates.length ? new Date(Math.max(...dates)) : null,
+    };
+  });
+
+  if (sortBy === "syncStrength") hotspots.sort((a, b) => b.avgSyncDegree - a.avgSyncDegree || b.eventCount - a.eventCount);
+  else if (sortBy === "recency") hotspots.sort((a, b) => (b.lastDate?.getTime() ?? 0) - (a.lastDate?.getTime() ?? 0));
+  else hotspots.sort((a, b) => b.eventCount - a.eventCount || a.activity.localeCompare(b.activity));
+
+  return hotspots.filter(h => h.eventCount > 0);
+}
+
+export function getEntitiesForHotspot(hotspotId, { maxEntities = 8 } = {}) {
+  if (!_store) return [];
+  const activity = hotspotId.startsWith("act:") ? hotspotId.slice(4) : hotspotId;
+  const sharedEvents = _store.events.filter(e => e.activity === activity && e.entity_ids.length > 1);
+  const entityCounts = {};
+  sharedEvents.forEach(e => {
+    e.entity_ids.forEach(id => { entityCounts[id] = (entityCounts[id] ?? 0) + 1; });
+  });
+  const sorted = Object.entries(entityCounts)
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .map(([id]) => id);
+  if (!sorted.length) return [];
+  const anchor = sorted[0];
+  const anchorType = _store.entityById[anchor]?.primary_type;
+  const rest = sorted.slice(1);
+  const byType = {};
+  rest.forEach(id => {
+    const t = _store.entityById[id]?.primary_type ?? "other";
+    if (!byType[t]) byType[t] = [];
+    byType[t].push(id);
+  });
+  const compareIds = [];
+  for (const type of Object.keys(byType).filter(t => t !== anchorType)) {
+    if (compareIds.length < maxEntities - 1) compareIds.push(byType[type][0]);
+  }
+  const anchorTypeRest = (byType[anchorType] ?? []).filter(id => id !== anchor);
+  for (const id of anchorTypeRest) {
+    if (compareIds.length >= maxEntities - 1) break;
+    compareIds.push(id);
+  }
+  for (const type of Object.keys(byType).filter(t => t !== anchorType)) {
+    for (const id of byType[type].slice(1)) {
+      if (compareIds.length >= maxEntities - 1) break;
+      if (!compareIds.includes(id)) compareIds.push(id);
+    }
+  }
+  return [anchor, ...compareIds];
+}
+
 function _buildEntityList(entities, eventsByEntityId) {
   return [...entities]
     .map(entity => ({
@@ -966,13 +1053,10 @@ function _pickPeerEntities(anchorEntityId, entityType, limit) {
   return candidates.slice(0, Math.max(limit, 0)).map(candidate => candidate.entityId);
 }
 
-function _resolveDetailTypeOrder(datasetName, contextEntityIds) {
-  const datasetKey = String(datasetName ?? "").toLowerCase();
-  const preferred = DETAIL_TYPE_ORDER[datasetKey] ?? [];
-  const available = [...new Set([...contextEntityIds].map(entityId => _store.entityById[entityId]?.primary_type).filter(Boolean))]
-    .sort((a, b) => a.localeCompare(b));
-  const ordered = [...preferred.filter(type => available.includes(type)), ...available.filter(type => !preferred.includes(type))];
-  return ordered;
+function _resolveDetailTypeOrder(_datasetName, contextEntityIds) {
+  const preferred = _store.typeRegistry?.orderedNames ?? [];
+  const available = new Set([...contextEntityIds].map(id => _store.entityById[id]?.primary_type).filter(Boolean));
+  return [...preferred.filter(t => available.has(t)), ...[...available].filter(t => !preferred.includes(t))];
 }
 
 function _sortDetailEntityIds(type, entityIds, anchorEntityId, compareEntityIds) {
