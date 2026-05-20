@@ -325,6 +325,9 @@ export function buildStore(bundle) {
     .sort((a, b) => a.localeCompare(b));
   const activityColorByName = _buildColorMap(allActivities, ACTIVITY_PALETTE);
   const resourceColorByName = _buildColorMap(allResources, RESOURCE_PALETTE, "#94a3b8");
+  const activityEventCount = {};
+  allActivities.forEach(a => { activityEventCount[a] = 0; });
+  events.forEach(event => { if (event.activity in activityEventCount) activityEventCount[event.activity]++; });
 
   events.forEach(event => {
     event.activityColor = activityColorByName[event.activity] ?? "#64748b";
@@ -373,6 +376,7 @@ export function buildStore(bundle) {
     allActivities,
     allResources,
     activityColorByName,
+    activityEventCount,
     resourceColorByName,
     caseList,
     caseSummaryById,
@@ -485,7 +489,8 @@ export function getDetailGraph(options = {}) {
     .sort((a, b) => _compareEvents(a, b));
 
   if (options.sharedOnly) {
-    const sharedIds = new Set(eventAnchors.filter(anchor => anchor.sharedEntityIds.length > 1).map(anchor => anchor.event_id));
+    const minShared = options.minSharedEntities ?? 2;
+    const sharedIds = new Set(eventAnchors.filter(anchor => anchor.sharedEntityIds.length >= minShared).map(anchor => anchor.event_id));
     eventAnchors = eventAnchors.filter(anchor => sharedIds.has(anchor.event_id));
     bands.forEach(band => {
       band.lanes.forEach(lane => {
@@ -554,7 +559,7 @@ export function getDetailGraph(options = {}) {
     itemType: _store.itemType,
     eventAnchors,
     bands: normalizedBands,
-    sharedEvents: eventAnchors.filter(anchor => anchor.sharedEntityIds.length > 1),
+    sharedEvents: eventAnchors.filter(anchor => anchor.sharedEntityIds.length >= (options.minSharedEntities ?? 2)),
     crossTypeLinks: _buildCrossTypeLinks(eventAnchors),
     relations: visibleRelations,
     summary,
@@ -687,7 +692,7 @@ export function getOverviewGraph(filters = {}) {
   };
 }
 
-export function getVariantOverview(filters = {}, maxVariants = 12) {
+export function getVariantOverview(filters = {}, maxVariants = null) {
   if (!_store) throw new Error("Store not built.");
   const instances = _collectItemSequences(filters);
   const totalInstances = instances.length;
@@ -709,7 +714,10 @@ export function getVariantOverview(filters = {}, maxVariants = 12) {
     }))
     .sort((a, b) => b.count - a.count || b.sequence.length - a.sequence.length || a._key.localeCompare(b._key));
 
-  const limit = maxVariants > 0 ? maxVariants : variants.length;
+  const topPercentLimit = Math.max(1, Math.ceil(variants.length * 0.2));
+  const limit = maxVariants === Number.POSITIVE_INFINITY
+    ? variants.length
+    : (Number.isFinite(maxVariants) && maxVariants > 0 ? maxVariants : topPercentLimit);
   const shownVariants = variants.slice(0, limit).map((variant, index) => ({
     key: variant._key,
     sequence: variant.sequence,
@@ -739,6 +747,8 @@ export function getVariantOverview(filters = {}, maxVariants = 12) {
     variants: shownVariants,
     totalInstances,
     variantCount: variants.length,
+    shownVariantCount: shownVariants.length,
+    shownVariantPercent: variants.length ? shownVariants.length / variants.length : 0,
     caseType: _store.caseType,
     itemType: _store.itemType,
     summary: {
@@ -753,6 +763,10 @@ export function getVariantOverview(filters = {}, maxVariants = 12) {
         : 0,
     },
   };
+}
+
+export function getAllVariantOverview(filters = {}) {
+  return getVariantOverview(filters, Number.POSITIVE_INFINITY);
 }
 
 export function getActivityDfGraph(filters = {}) {
@@ -902,11 +916,11 @@ export function getActivityCountsForEntity(entityId) {
   return _countBy(_store.eventsByEntityId[entityId] ?? [], event => event.activity);
 }
 
-export function getGlobalSharedEventHotspots({ activities = null, entityTypeFilter = null, sortBy = "frequency" } = {}) {
+export function getGlobalSharedEventHotspots({ activities = null, entityTypeFilter = null, sortBy = "frequency", minSharedEntities = 2 } = {}) {
   if (!_store) return [];
   const byActivity = new Map();
   _store.events.forEach(event => {
-    if (event.entity_ids.length < 2) return;
+    if (event.entity_ids.length < minSharedEntities) return;
     if (activities && !activities.has(event.activity)) return;
     const types = [...new Set(event.memberships.map(m => m.entity_type))];
     if (entityTypeFilter && !types.some(t => entityTypeFilter.has(t))) return;
@@ -951,10 +965,155 @@ export function getGlobalSharedEventHotspots({ activities = null, entityTypeFilt
   return hotspots.filter(h => h.eventCount > 0);
 }
 
+export function getTypeEKGGraph(filters = {}) {
+  if (!_store) return null;
+  const activities = filters.activities ?? null;
+
+  const filteredEvents = _store.events.filter(e => !activities || activities.has(e.activity));
+
+  // Group events by entity type (an event appears in all types it's correlated to)
+  const eventsByType = {};
+  filteredEvents.forEach(event => {
+    const types = [...new Set(event.memberships.map(m => m.entity_type))];
+    types.forEach(type => {
+      if (!eventsByType[type]) eventsByType[type] = [];
+      eventsByType[type].push(event);
+    });
+  });
+
+  const entityTypes = Object.keys(eventsByType).sort((a, b) =>
+    eventsByType[b].length - eventsByType[a].length
+  );
+
+  // Aggregate activity nodes per type (count + mean timestamp)
+  const bandsByType = {};
+  entityTypes.forEach(type => {
+    const actMap = {};
+    eventsByType[type].forEach(event => {
+      if (!actMap[event.activity]) actMap[event.activity] = { count: 0, sum: 0, n: 0 };
+      actMap[event.activity].count++;
+      if (event.date) { actMap[event.activity].sum += event.date.getTime(); actMap[event.activity].n++; }
+    });
+    bandsByType[type] = {
+      nodes: Object.entries(actMap).map(([activity, d]) => ({
+        activity,
+        count: d.count,
+        meanTimestamp: d.n > 0 ? d.sum / d.n : 0,
+      })).sort((a, b) => a.meanTimestamp - b.meanTimestamp),
+      dfEdges: [],
+    };
+  });
+
+  // Build DF transition counts per entity type from raw DF edges
+  const dfByType = {};
+  _store.df.forEach(edge => {
+    const entity = _store.entityById[edge.entity_id];
+    if (!entity || !bandsByType[entity.primary_type]) return;
+    const srcAct = _store.eventById[edge.source]?.activity;
+    const tgtAct = _store.eventById[edge.target]?.activity;
+    if (!srcAct || !tgtAct) return;
+    if (activities && (!activities.has(srcAct) || !activities.has(tgtAct))) return;
+    const type = entity.primary_type;
+    if (!dfByType[type]) dfByType[type] = {};
+    const key = `${srcAct}\x00${tgtAct}`;
+    dfByType[type][key] = (dfByType[type][key] ?? 0) + 1;
+  });
+  entityTypes.forEach(type => {
+    bandsByType[type].dfEdges = Object.entries(dfByType[type] ?? {})
+      .map(([key, count]) => { const [source, target] = key.split("\x00"); return { source, target, count }; })
+      .sort((a, b) => b.count - a.count)
+      .slice(0, 28);
+  });
+
+  // Cross-type sync arcs: events correlated to 2+ entity types
+  const syncMap = {};
+  filteredEvents.forEach(event => {
+    const types = [...new Set(event.memberships.map(m => m.entity_type))].sort();
+    if (types.length < 2) return;
+    for (let i = 0; i < types.length; i++) {
+      for (let j = i + 1; j < types.length; j++) {
+        const key = `${event.activity}\x00${types[i]}\x00${types[j]}`;
+        if (!syncMap[key]) syncMap[key] = { activity: event.activity, type1: types[i], type2: types[j], count: 0 };
+        syncMap[key].count++;
+      }
+    }
+  });
+
+  const allTimes = filteredEvents.map(e => e.date?.getTime()).filter(Number.isFinite);
+  return {
+    entityTypes,
+    bandsByType,
+    syncArcs: Object.values(syncMap).sort((a, b) => b.count - a.count).slice(0, 48),
+    minTime: allTimes.length ? Math.min(...allTimes) : 0,
+    maxTime: allTimes.length ? Math.max(...allTimes) : 1,
+    totalEvents: filteredEvents.length,
+    caseType: _store.caseType,
+    itemType: _store.itemType,
+  };
+}
+
+export function getSharedEventOverview({ activities = null, limit = 10, minSharedEntities = 2 } = {}) {
+  if (!_store) return { totalSharedEvents: 0, topActivities: [], topEntityEvents: [], topTypePairs: [] };
+  const sharedEvents = _store.events.filter(event =>
+    event.entity_ids.length >= minSharedEntities && (!activities || activities.has(event.activity))
+  );
+  const topActivities = getGlobalSharedEventHotspots({ activities, sortBy: "frequency", minSharedEntities }).slice(0, limit);
+  const typePairCounts = new Map();
+  sharedEvents.forEach(event => {
+    const types = [...new Set(event.memberships.map(membership => membership.entity_type))].sort();
+    for (let i = 0; i < types.length; i++) {
+      for (let j = i + 1; j < types.length; j++) {
+        const key = `${types[i]} -> ${types[j]}`;
+        if (!typePairCounts.has(key)) typePairCounts.set(key, { pair: key, eventIds: new Set(), entityIds: new Set() });
+        const entry = typePairCounts.get(key);
+        entry.eventIds.add(event.event_id);
+        event.memberships
+          .filter(membership => membership.entity_type === types[i] || membership.entity_type === types[j])
+          .forEach(membership => entry.entityIds.add(membership.entity_id));
+      }
+    }
+  });
+  const topTypePairs = [...typePairCounts.values()]
+    .map(entry => ({
+      pair: entry.pair,
+      eventCount: entry.eventIds.size,
+      entityCount: entry.entityIds.size,
+    }))
+    .sort((a, b) => b.eventCount - a.eventCount || b.entityCount - a.entityCount || a.pair.localeCompare(b.pair))
+    .slice(0, limit);
+  const _seenTypeSets = new Set();
+  const topEntityEvents = sharedEvents
+    .map(event => ({
+      eventId: event.event_id,
+      activity: event.activity,
+      color: _store.activityColorByName[event.activity] ?? "#64748b",
+      entityCount: event.entity_ids.length,
+      entityTypes: [...new Set(event.memberships.map(membership => membership.entity_type))].sort(),
+      timestamp: event.date,
+      entityPreview: event.entity_ids.slice(0, 4),
+    }))
+    .sort((a, b) => b.entityCount - a.entityCount || (a.timestamp?.getTime?.() ?? 0) - (b.timestamp?.getTime?.() ?? 0) || a.eventId.localeCompare(b.eventId))
+    .filter(ev => {
+      const key = ev.entityTypes.join("|");
+      if (_seenTypeSets.has(key)) return false;
+      _seenTypeSets.add(key);
+      return true;
+    })
+    .slice(0, limit);
+
+  return {
+    totalSharedEvents: sharedEvents.length,
+    totalSharedEntities: new Set(sharedEvents.flatMap(event => event.entity_ids)).size,
+    topActivities,
+    topEntityEvents,
+    topTypePairs,
+  };
+}
+
 export function getEntitiesForHotspot(hotspotId, { maxEntities = 8 } = {}) {
   if (!_store) return [];
   const activity = hotspotId.startsWith("act:") ? hotspotId.slice(4) : hotspotId;
-  const sharedEvents = _store.events.filter(e => e.activity === activity && e.entity_ids.length > 1);
+  const sharedEvents = _store.events.filter(e => e.activity === activity && e.entity_ids.length > 2);
   const entityCounts = {};
   sharedEvents.forEach(e => {
     e.entity_ids.forEach(id => { entityCounts[id] = (entityCounts[id] ?? 0) + 1; });

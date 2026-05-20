@@ -2,6 +2,94 @@
 
 // Extracted from layout.js: overview network, variant, and DFG layout.
 
+// ── Type-level EKG layout constants ───────────────────────────────────────────
+const TEKG_PAD_LEFT   = 152;
+const TEKG_PAD_RIGHT  = 52;
+const TEKG_PAD_TOP    = 46;
+const TEKG_BAND_H     = 138;
+const TEKG_BAND_GAP   = 24;
+const TEKG_NODE_MIN_R = 7;
+const TEKG_NODE_MAX_R = 24;
+const TEKG_NODE_MIN_SEP = 56;
+
+export function computeTypeEKGLayout(typeEKG, width) {
+  if (!typeEKG || !typeEKG.entityTypes.length) return { bands: [], syncArcs: [], totalHeight: 120 };
+
+  const innerW   = Math.max(width - TEKG_PAD_LEFT - TEKG_PAD_RIGHT, 320);
+  const timeSpan = Math.max(typeEKG.maxTime - typeEKG.minTime, 1);
+  const xFromTime = t => TEKG_PAD_LEFT + ((t - typeEKG.minTime) / timeSpan) * innerW;
+
+  const allCounts = typeEKG.entityTypes.flatMap(t => typeEKG.bandsByType[t].nodes.map(n => n.count));
+  const maxCount  = Math.max(...allCounts, 1);
+  const rScale    = count => TEKG_NODE_MIN_R + Math.sqrt(count / maxCount) * (TEKG_NODE_MAX_R - TEKG_NODE_MIN_R);
+
+  let y = TEKG_PAD_TOP;
+  const bandLayouts = {};
+
+  typeEKG.entityTypes.forEach(type => {
+    const band = typeEKG.bandsByType[type];
+    const cy   = y + TEKG_BAND_H / 2;
+
+    const rawNodes = band.nodes.map(node => ({
+      ...node,
+      x: xFromTime(node.meanTimestamp),
+      y: cy,
+      r: rScale(node.count),
+    }));
+    const nodes = _spread1D(rawNodes, TEKG_NODE_MIN_SEP, TEKG_PAD_LEFT, TEKG_PAD_LEFT + innerW);
+    const nodeByAct = Object.fromEntries(nodes.map(n => [n.activity, n]));
+
+    const maxDf = Math.max(...band.dfEdges.map(e => e.count), 1);
+    const edges = band.dfEdges
+      .filter(e => nodeByAct[e.source] && nodeByAct[e.target])
+      .map(e => {
+        const s = nodeByAct[e.source], t = nodeByAct[e.target];
+        const dx    = t.x - s.x;
+        const curve = Math.max(18, Math.min(54, Math.abs(dx) * 0.28));
+        const sw    = 0.8 + (e.count / maxDf) * 2.8;
+        return { ...e, sw,
+          x1: s.x + (dx < 0 ? -s.r : s.r), y1: cy,
+          x2: t.x + (dx < 0 ? t.r : -t.r),  y2: cy,
+          cx: (s.x + t.x) / 2, cy: cy - curve };
+      });
+
+    bandLayouts[type] = { type, y, height: TEKG_BAND_H, cy, nodes, edges, nodeByAct };
+    y += TEKG_BAND_H + TEKG_BAND_GAP;
+  });
+
+  // Sync arcs between bands
+  const maxSync = Math.max(...typeEKG.syncArcs.map(a => a.count), 1);
+  const syncArcs = typeEKG.syncArcs.map(arc => {
+    const b1 = bandLayouts[arc.type1], b2 = bandLayouts[arc.type2];
+    if (!b1 || !b2) return null;
+    const n1 = b1.nodeByAct[arc.activity], n2 = b2.nodeByAct[arc.activity];
+    if (!n1 || !n2) return null;
+    const sw = 0.7 + (arc.count / maxSync) * 2.8;
+    return { ...arc, sw,
+      x1: n1.x, y1: n1.y + n1.r,
+      x2: n2.x, y2: n2.y - n2.r,
+      cx: (n1.x + n2.x) / 2, cy: (n1.y + n2.y) / 2 };
+  }).filter(Boolean);
+
+  const totalHeight = Math.max(y - TEKG_BAND_GAP + TEKG_PAD_TOP, 200);
+  return { bands: Object.values(bandLayouts), syncArcs, totalHeight, padLeft: TEKG_PAD_LEFT, innerW, minTime: typeEKG.minTime, maxTime: typeEKG.maxTime };
+}
+
+function _spread1D(nodes, minSep, minX, maxX) {
+  if (nodes.length <= 1) return nodes;
+  const sorted = [...nodes].sort((a, b) => a.x - b.x);
+  for (let i = 1; i < sorted.length; i++) {
+    const needed = sorted[i - 1].x + minSep;
+    if (sorted[i].x < needed) sorted[i] = { ...sorted[i], x: needed };
+  }
+  // Shift left if right edge exceeds maxX
+  const overflow = sorted[sorted.length - 1].x - maxX;
+  if (overflow > 0) sorted.forEach((n, i) => { sorted[i] = { ...n, x: n.x - overflow }; });
+  // Clamp to minX
+  sorted.forEach((n, i) => { if (n.x < minX) sorted[i] = { ...n, x: minX }; });
+  return sorted;
+}
+
 const OVERVIEW_PAD_X = 32;
 const OVERVIEW_PAD_Y = 26;
 const VARIANT_HEADER_H = 34;
@@ -17,6 +105,10 @@ const SATELLITE_RING_GAP = 28;
 const SATELLITES_PER_RING = 5;
 const FOCUS_RESOURCE_LIMIT = 8;
 const FOCUS_ATTR_LIMIT = 8;
+const OVERVIEW_COMMUNITY_MIN_R = 18;
+const OVERVIEW_COMMUNITY_MAX_R = 34;
+const OVERVIEW_COMMUNITY_MIN_CELL_W = 118;
+const OVERVIEW_COMMUNITY_CELL_H = 124;
 
 function _clampNumber(value, min, max) {
   return Math.min(max, Math.max(min, value));
@@ -109,40 +201,24 @@ export function computeDfGraphLayout(dfGraph, width, height) {
   return { nodes: laidOutNodes, edges: laidOutEdges };
 }
 
-export function computeOverviewNetworkLayout(graph, width) {
+export function computeOverviewNetworkLayout(graph, width, options = {}) {
   const clusters = [...graph.clusters].sort((a, b) => b.nodeIds.length - a.nodeIds.length || a.label.localeCompare(b.label));
   if (graph.meta?.focusCommunityId && clusters.length === 1) {
-    return _layoutFocusedCommunity(graph, width, clusters[0]);
+    return _layoutFocusedCommunity(graph, width, clusters[0], options);
   }
 
   const nodeLayouts = [];
   const nodePos = {};
 
+  const maxCommunitySize = Math.max(...clusters.map(cluster => cluster.nodeIds?.length ?? 0), 1);
   const clusterModels = clusters.map(cluster => {
     const members = graph.nodes.filter(n => cluster.nodeIds.includes(n.id))
       .sort((a, b) => b.weightedDegree - a.weightedDegree || b.degree - a.degree || a.id.localeCompare(b.id));
-    const radius = CLUSTER_INNER_R + Math.max(0, Math.ceil((members.length - 1) / 6)) * CLUSTER_RING_GAP;
-    const satellites = [
-      ..._layoutSatelliteArc(cluster.resources ?? [], radius + 42, 0.68 * Math.PI, 1.32 * Math.PI),
-      ..._layoutSatelliteArc(cluster.attributes ?? [], radius + 42, -0.32 * Math.PI, 0.32 * Math.PI),
-    ];
-    const outerRadius = satellites.reduce((max, s) => Math.max(max, Math.hypot(s.dx, s.dy) + Math.max(s.w, s.h) * 0.6), radius + 28);
-    return { ...cluster, members, radius, outerRadius, satellites };
+    const radius = _overviewCommunityRadius(members.length, maxCommunitySize);
+    return { ...cluster, members, radius, outerRadius: radius + 22, satellites: [] };
   });
 
-  const placed = [];
-  clusterModels.forEach((cluster, index) => {
-    if (index === 0) { placed.push({ ...cluster, cx: 0, cy: 0 }); return; }
-    let chosen = null;
-    for (let step = 1; step < 2400; step++) {
-      const angle = step * COMMUNITY_SPIRAL_TURNS;
-      const distance = cluster.outerRadius + 80 + step * COMMUNITY_SPIRAL_STEP * 0.34;
-      const cx = Math.cos(angle) * distance, cy = Math.sin(angle) * distance;
-      const collides = placed.some(other => Math.hypot(cx - other.cx, cy - other.cy) < cluster.outerRadius + other.outerRadius + COMMUNITY_GAP);
-      if (!collides) { chosen = { x: cx, y: cy }; break; }
-    }
-    placed.push({ ...cluster, cx: chosen?.x ?? 0, cy: chosen?.y ?? 0 });
-  });
+  const placed = _layoutClustersInViewport(clusterModels, width, options.viewportHeight ?? 760);
 
   const bounds = placed.reduce((acc, c) => {
     acc.minX = Math.min(acc.minX, c.cx - c.outerRadius); acc.maxX = Math.max(acc.maxX, c.cx + c.outerRadius);
@@ -150,8 +226,8 @@ export function computeOverviewNetworkLayout(graph, width) {
     return acc;
   }, { minX: Infinity, maxX: -Infinity, minY: Infinity, maxY: -Infinity });
 
-  const shiftX = Math.max(OVERVIEW_PAD_X - bounds.minX, (width / 2) - ((bounds.minX + bounds.maxX) / 2));
-  const shiftY = OVERVIEW_PAD_Y + 32 - bounds.minY;
+  const shiftX = 0;
+  const shiftY = 0;
 
   const clusterLayouts = placed.map(cluster => {
     const cx = cluster.cx + shiftX, cy = cluster.cy + shiftY;
@@ -182,17 +258,48 @@ export function computeOverviewNetworkLayout(graph, width) {
 
   return {
     overviewNetwork: true,
-    totalHeight: (bounds.maxY - bounds.minY) + OVERVIEW_PAD_Y * 2 + 40,
+    totalHeight: Math.max((options.viewportHeight ?? 760) - 20, bounds.maxY + OVERVIEW_PAD_Y + 40),
     network: { nodes: nodeLayouts, edges: edgeLayouts, communityEdges: graph.communityEdges ?? [], clusters: clusterLayouts, meta: graph.meta },
   };
 }
 
-function _layoutFocusedCommunity(graph, width, cluster) {
+function _layoutClustersInViewport(clusterModels, width, viewportHeight) {
+  if (!clusterModels.length) return [];
+  const availableW = Math.max(width - OVERVIEW_PAD_X * 2, 360);
+  const count = clusterModels.length;
+  const columns = Math.max(1, Math.min(count, Math.floor(availableW / OVERVIEW_COMMUNITY_MIN_CELL_W)));
+  const rows = Math.ceil(count / columns);
+  const cellW = availableW / columns;
+  const cellH = OVERVIEW_COMMUNITY_CELL_H;
+  const totalW = availableW;
+  const originX = OVERVIEW_PAD_X + Math.max(0, (availableW - totalW) / 2);
+  const originY = OVERVIEW_PAD_Y + 42;
+
+  return clusterModels.map((cluster, index) => {
+    const row = Math.floor(index / columns);
+    const col = index % columns;
+    const rowCount = row === rows - 1 ? count - row * columns : columns;
+    const rowOffset = (columns - rowCount) * cellW * 0.5;
+    return {
+      ...cluster,
+      cx: originX + rowOffset + col * cellW + cellW / 2,
+      cy: originY + row * cellH + cellH / 2,
+    };
+  });
+}
+
+function _overviewCommunityRadius(size, maxSize) {
+  const ratio = Math.sqrt(Math.max(size, 1) / Math.max(maxSize, 1));
+  return OVERVIEW_COMMUNITY_MIN_R + ratio * (OVERVIEW_COMMUNITY_MAX_R - OVERVIEW_COMMUNITY_MIN_R);
+}
+
+function _layoutFocusedCommunity(graph, width, cluster, options = {}) {
   const members = graph.nodes.filter(n => cluster.nodeIds.includes(n.id))
     .sort((a, b) => b.weightedDegree - a.weightedDegree || b.degree - a.degree || a.id.localeCompare(b.id));
   const centerX = Math.max(width * 0.5, OVERVIEW_PAD_X + 360);
-  const centerY = OVERVIEW_PAD_Y + 340;
-  const focusRadius = Math.max(138, Math.min(width * 0.18, 230));
+  const viewportHeight = options.viewportHeight ?? 760;
+  const centerY = Math.max(OVERVIEW_PAD_Y + 250, viewportHeight * 0.48);
+  const focusRadius = Math.max(158, Math.min(width * 0.22, viewportHeight * 0.26, 260));
   const nodeLayouts = [], nodePos = {};
 
   members.forEach((node, index) => {

@@ -54,9 +54,7 @@ export function updateTopbar(route, store) {
       ctxText = "Variants";
     }
   } else if (route.name === "summarize") {
-    ctxText = route.params.community
-      ? (store?.communities?.find(c => c.id === route.params.community)?.label ?? "Community")
-      : "All communities";
+    ctxText = "Process graph";
   } else if (route.name === "explore") {
     ctxText = route.params.cluster
       ? decodeURIComponent(route.params.cluster).replace("act:", "")

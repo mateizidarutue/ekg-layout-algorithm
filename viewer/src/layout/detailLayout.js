@@ -17,10 +17,11 @@ const EVENT_STACK_GAP = 18;
 const EVENT_STACK_BASE_OFFSET = 12;
 const EVENT_STACK_CLEARANCE = 15;
 const SHARED_CLUSTER_GAP = 18;
-const SHARED_CLUSTER_ROW_GAP = 24;
+const SHARED_CLUSTER_ROW_GAP = 30;
 const SHARED_CLUSTER_BASE_OFFSET = 16;
-const SHARED_CLUSTER_H = 20;
-const SHARED_CLUSTER_CLEARANCE = 10;
+const SHARED_CLUSTER_H = 22;
+const SHARED_CLUSTER_CLEARANCE = 14;
+const SHARED_CLUSTER_LANE_GAP = 38;
 const HEADER_RESERVED_H = 86;
 
 export function computeDetailLayout(graph, width) {
@@ -41,16 +42,17 @@ export function computeDetailLayout(graph, width) {
   const stackRows = _assignAnchorRows(soloAnchorSeeds, soloXs);
   const stackDepth = Math.max(...stackRows, -1) + 1;
   const clusterSeeds = _buildSharedEventClusters(seeds.filter(anchor => anchor.isSharedEvent));
-  const clusterDepth = Math.max(...clusterSeeds.map(cluster => cluster.stackRow), -1) + 1;
+  const clusterDepth = Math.max(...clusterSeeds.map(cluster => cluster.laneIndex), -1) + 1;
   const railDepth = Math.max(
     Math.max(stackDepth, 1) * EVENT_STACK_GAP,
-    clusterSeeds.length ? Math.max(clusterDepth, 1) * SHARED_CLUSTER_ROW_GAP + 8 : 0
+    clusterSeeds.length ? Math.max(clusterDepth, 1) * SHARED_CLUSTER_LANE_GAP + 14 : 0
   );
   const axisY = DETAIL_PAD_TOP + HEADER_RESERVED_H + railDepth + 18;
   const sharedEventClusters = clusterSeeds.map(cluster => ({
     ...cluster,
-    y: axisY - SHARED_CLUSTER_BASE_OFFSET - cluster.stackRow * SHARED_CLUSTER_ROW_GAP,
+    y: axisY - SHARED_CLUSTER_BASE_OFFSET - cluster.laneIndex * SHARED_CLUSTER_LANE_GAP,
   }));
+  const sharedClusterLanes = _buildSharedClusterLanes(sharedEventClusters, axisY, timelineW);
   const clusterByEventId = Object.fromEntries(sharedEventClusters.flatMap(cluster =>
     cluster.eventIds.map(eventId => [eventId, cluster])
   ));
@@ -84,15 +86,17 @@ export function computeDetailLayout(graph, width) {
         const target = anchorById[edge.target_event_id];
         if (!source || !target) return null;
         const dx = target.x - source.x;
-        const curve = Math.min(18, Math.max(10, Math.abs(dx) * 0.1));
+        const direction = dx >= 0 ? 1 : -1;
+        const curve = Math.min(8, Math.max(4, Math.abs(dx) * 0.018));
+        const endpointPad = Math.min(Math.abs(dx) * 0.22, LANE_MARKER_R + 3);
         return {
           ...edge,
-          x1: source.x,
-          y1: y,
-          x2: target.x,
-          y2: y,
+          x1: source.x + endpointPad * direction,
+          y1: y - 1,
+          x2: target.x - endpointPad * direction,
+          y2: y - 1,
           cx: (source.x + target.x) / 2,
-          cy: y - curve - 2,
+          cy: y - curve,
         };
       }).filter(Boolean);
       return {
@@ -156,6 +160,29 @@ export function computeDetailLayout(graph, width) {
     })
     .filter(Boolean);
 
+  const sharedEventClustersWithBands = sharedEventClusters.map(cluster => {
+    const relatedAnchors = cluster.eventIds.map(eventId => anchorById[eventId]).filter(Boolean);
+    const membershipYs = relatedAnchors
+      .flatMap(anchor => (anchor.memberships ?? []).map(membership => lanePositionById[membership.entity_id]?.y))
+      .filter(Number.isFinite);
+    const visibleEntityIds = new Set(relatedAnchors.flatMap(anchor =>
+      (anchor.memberships ?? [])
+        .filter(membership => lanePositionById[membership.entity_id])
+        .map(membership => membership.entity_id)
+    ));
+    const bandWidth = Math.max(16, cluster.maxX - cluster.minX + 18);
+    const minMemberY = membershipYs.length ? Math.min(...membershipYs) : cluster.y + cluster.height / 2;
+    const maxMemberY = membershipYs.length ? Math.max(...membershipYs) : cluster.y + cluster.height / 2;
+    return {
+      ...cluster,
+      bandX: cluster.x - bandWidth / 2,
+      bandWidth,
+      bandY1: Math.min(cluster.y + cluster.height / 2, minMemberY),
+      bandY2: Math.max(cluster.y + cluster.height / 2, maxMemberY) + LANE_MARKER_R + 7,
+      visibleLaneCount: visibleEntityIds.size,
+    };
+  });
+
   const relationLinks = (graph?.relations ?? []).map(relation => {
     const sourceLane = lanePositionById[relation.source_entity_id];
     const targetLane = lanePositionById[relation.target_entity_id];
@@ -177,7 +204,8 @@ export function computeDetailLayout(graph, width) {
   return {
     anchors: laidAnchors,
     anchorRail: laidAnchors.filter(anchor => !anchor.isSharedEvent),
-    sharedEventClusters,
+    sharedEventClusters: sharedEventClustersWithBands,
+    sharedClusterLanes,
     bands: laidBands,
     corrLinks,
     sharedGuides,
@@ -218,14 +246,21 @@ function _assignAnchorRows(anchors, xs) {
 
 function _buildSharedEventClusters(sharedAnchors) {
   if (!sharedAnchors.length) return [];
-  const sorted = [...sharedAnchors].sort((a, b) => a.x - b.x || _compareAnchors(a, b));
+  const sorted = [...sharedAnchors].sort((a, b) =>
+    _sharedLaneKey(a).localeCompare(_sharedLaneKey(b))
+    || a.x - b.x
+    || _compareAnchors(a, b)
+  );
   const clusters = [];
   let current = null;
 
   sorted.forEach(anchor => {
-    if (!current || anchor.x - current.maxX > SHARED_CLUSTER_GAP) {
+    const laneKey = _sharedLaneKey(anchor);
+    if (!current || current.laneKey !== laneKey || anchor.x - current.maxX > SHARED_CLUSTER_GAP) {
       current = {
         id: `shared-cluster-${clusters.length + 1}`,
+        laneKey,
+        laneLabel: _sharedLaneLabel(anchor),
         anchors: [anchor],
         minX: anchor.x,
         maxX: anchor.x,
@@ -257,9 +292,12 @@ function _buildSharedEventClusters(sharedAnchors) {
     const entityTypes = [...new Set(cluster.anchors.flatMap(anchor =>
       (anchor.memberships ?? []).map(membership => membership.entity_type)
     ))];
-    const width = Math.max(30, 18 + activityPalette.length * 8 + String(eventIds.length).length * 8);
+    const spanWidth = Math.max(0, cluster.maxX - cluster.minX);
+    const width = Math.max(40, Math.min(170, spanWidth + 24 + activityPalette.length * 8 + String(eventIds.length).length * 8));
     return {
       id: `shared-cluster-${index + 1}`,
+      laneKey: cluster.laneKey,
+      laneLabel: cluster.laneLabel,
       anchorIds: eventIds,
       eventIds,
       eventCount: eventIds.length,
@@ -279,10 +317,31 @@ function _buildSharedEventClusters(sharedAnchors) {
     };
   });
 
+  const laneByKey = new Map();
+  prepared.forEach(cluster => {
+    if (!laneByKey.has(cluster.laneKey)) {
+      laneByKey.set(cluster.laneKey, {
+        key: cluster.laneKey,
+        label: cluster.laneLabel,
+        count: 0,
+        minX: Infinity,
+        maxX: -Infinity,
+      });
+    }
+    const lane = laneByKey.get(cluster.laneKey);
+    lane.count += cluster.eventCount;
+    lane.minX = Math.min(lane.minX, cluster.minX);
+    lane.maxX = Math.max(lane.maxX, cluster.maxX);
+  });
+  const orderedLanes = [...laneByKey.values()]
+    .sort((a, b) => b.count - a.count || a.label.localeCompare(b.label))
+    .map((lane, index) => ({ ...lane, index }));
+  const laneIndexByKey = Object.fromEntries(orderedLanes.map(lane => [lane.key, lane.index]));
   const rows = _assignClusterRows(prepared);
   return prepared.map((cluster, index) => ({
     ...cluster,
     stackRow: rows[index],
+    laneIndex: laneIndexByKey[cluster.laneKey] ?? rows[index],
     y: null,
   }));
 }
@@ -300,6 +359,50 @@ function _assignClusterRows(clusters) {
     }
     return rowIndex;
   });
+}
+
+function _buildSharedClusterLanes(clusters, axisY, timelineW) {
+  const byLane = new Map();
+  clusters.forEach(cluster => {
+    if (!byLane.has(cluster.laneKey)) {
+      byLane.set(cluster.laneKey, {
+        key: cluster.laneKey,
+        label: cluster.laneLabel,
+        laneIndex: cluster.laneIndex,
+        eventCount: 0,
+        clusterCount: 0,
+      });
+    }
+    const lane = byLane.get(cluster.laneKey);
+    lane.eventCount += cluster.eventCount;
+    lane.clusterCount += 1;
+  });
+  return [...byLane.values()]
+    .sort((a, b) => a.laneIndex - b.laneIndex)
+    .map(lane => ({
+      ...lane,
+      x: TIMELINE_X0,
+      y: axisY - SHARED_CLUSTER_BASE_OFFSET - lane.laneIndex * SHARED_CLUSTER_LANE_GAP,
+      width: timelineW,
+      height: SHARED_CLUSTER_ROW_GAP,
+    }));
+}
+
+function _sharedLaneKey(anchor) {
+  const activity = anchor?.activity ?? "Unknown";
+  const types = [...new Set((anchor?.memberships ?? []).map(membership => membership.entity_type))]
+    .sort()
+    .join("+") || "entities";
+  return `${activity}__${types}`;
+}
+
+function _sharedLaneLabel(anchor) {
+  const activity = anchor?.activity ?? "Unknown";
+  const types = [...new Set((anchor?.memberships ?? []).map(membership => membership.entity_type))]
+    .sort()
+    .slice(0, 2)
+    .join("+");
+  return types ? `${activity} / ${types}` : activity;
 }
 
 function _buildAxisTicks(minTime, maxTime, timelineW) {

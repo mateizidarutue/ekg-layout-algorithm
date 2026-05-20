@@ -28,7 +28,7 @@
 
       <!-- Camera hint (all routes except home) -->
       <div class="ctrl-group non-home-only" style="padding:8px 12px">
-        <div class="ctrl-hint">Pan: drag or WASD/arrows · Zoom: wheel or +/- · Fit: F · Reset: 0</div>
+        <div class="ctrl-hint">Scroll vertically like a web page · Use Shift+wheel or the bottom scrollbar for wide views · Top: F or 0</div>
       </div>
 
       <!-- Overview/community summary (summarize route) -->
@@ -57,13 +57,13 @@
       </div>
 
       <!-- Edge visibility (identify + compare routes) -->
-      <div class="ctrl-group identify-compare-only">
+      <div class="ctrl-group identify-compare-only canvas-controls-only">
         <div class="ctrl-label section-label">Edge layers</div>
         <label class="toggle-row">
           <input id="toggle-df" type="checkbox" checked />
           DF
-          <input id="opa-df" type="range" min="0.05" max="1" step="0.05" value="0.78" class="slider slider-inline" />
-          <span id="opa-df-val" class="ctrl-val">0.78</span>
+          <input id="opa-df" type="range" min="0.05" max="1" step="0.05" value="1" class="slider slider-inline" />
+          <span id="opa-df-val" class="ctrl-val">1</span>
         </label>
         <label class="toggle-row">
           <input id="toggle-corr" type="checkbox" />
@@ -103,7 +103,10 @@
       <div class="ctrl-group compare-mode-only" id="compare-strip-panel">
         <div class="ctrl-label section-label">Compared entities</div>
         <div id="compare-strip-list"></div>
-        <button id="btn-add-compare-entity" type="button" class="btn btn-sm" style="margin-top:8px">+ Add entity</button>
+        <div class="compare-add-wrap" id="compare-add-wrap">
+          <input id="compare-add-input" type="text" class="search-input" placeholder="Type entity ID to add…" autocomplete="off" />
+          <div id="compare-add-results" class="compare-add-results hidden"></div>
+        </div>
       </div>
 
       <!-- Explore hotspot summary (explore drilled route) -->
@@ -132,19 +135,19 @@
       </div>
 
       <!-- Shared events (identify + compare routes) -->
-      <div class="ctrl-group identify-compare-only">
+      <div class="ctrl-group identify-compare-only canvas-controls-only">
         <div class="ctrl-label section-label">Shared-event hotspots</div>
         <div id="shared-event-list" class="shared-event-list"></div>
       </div>
 
       <!-- Shared cluster activity filter -->
-      <div class="ctrl-group identify-compare-only hidden" id="cluster-activity-panel">
+      <div class="ctrl-group identify-compare-only canvas-controls-only hidden" id="cluster-activity-panel">
         <div class="ctrl-label section-label" id="cluster-activity-title">Cluster event types</div>
         <div id="cluster-activity-content"></div>
       </div>
 
       <!-- Legend (identify + compare routes) -->
-      <div class="ctrl-group identify-compare-only">
+      <div class="ctrl-group identify-compare-only canvas-controls-only">
         <div class="ctrl-label section-label">Legend</div>
         <div id="legend-content" class="legend-content"></div>
       </div>
@@ -176,6 +179,7 @@
       <!-- ── Top bar ── -->
       <div id="topbar">
         <div class="topbar-left">
+          <button id="btn-back" type="button" class="topbar-btn topbar-back non-home-only" aria-label="Go back">Back</button>
           <button id="btn-home" type="button" class="topbar-btn topbar-home" aria-label="Home">
             <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
               <path d="M2 6.5L8 2l6 4.5V14a1 1 0 01-1 1H3a1 1 0 01-1-1V6.5z" stroke="currentColor" stroke-width="1.4" fill="none"/>
@@ -191,13 +195,13 @@
         <div class="topbar-right">
           <span id="topbar-dataset-name" class="topbar-dataset-name"></span>
           <button id="btn-switch-dataset" type="button" class="topbar-btn">Switch dataset</button>
-          <button id="btn-fit" type="button" class="topbar-btn" aria-label="Fit view">Fit</button>
-          <button id="btn-reset-zoom" type="button" class="topbar-btn" aria-label="Reset zoom">Reset zoom</button>
+          <button id="btn-fit" type="button" class="topbar-btn" aria-label="Scroll to top">Top</button>
+          <button id="btn-reset-zoom" type="button" class="topbar-btn" aria-label="Reset view">Reset view</button>
         </div>
       </div>
 
       <!-- ── Canvas wrap ── -->
-      <div id="canvas-wrap" class="canvas-wrap" tabindex="0" aria-label="Graph canvas. Use arrow keys or WASD to pan, plus and minus to zoom, 0 to reset, and F to fit.">
+      <div id="canvas-wrap" class="canvas-wrap" tabindex="0" aria-label="Graph canvas. Scroll normally to move through the view. Press F or 0 to return to the top.">
         <svg id="canvas" class="canvas"></svg>
 
         <!-- DOM screen host (home, explore list) -->

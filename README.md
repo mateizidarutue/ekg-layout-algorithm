@@ -10,6 +10,25 @@ It contains:
 
 The repository is organized around one core idea: flat case-centric process views are not enough for object-centric processes such as purchase orders with items, or members borrowing multiple books. The prototype therefore treats an execution as a typed graph of interacting entities and visualizes it with layouts that preserve both time and cross-entity structure.
 
+## Current Implementation Status
+
+All four task screens are fully implemented and demo-ready.
+
+| Task | Route | Screen type | Status |
+|---|---|---|---|
+| T1 Lifecycle | `#/identify` | SVG canvas | Complete |
+| T2 Variants & Comparison | `#/compare` | SVG canvas | Complete |
+| T3 Process Overview | `#/summarize` | HTML card grid | Complete |
+| T4 Shared Events | `#/explore` | HTML dashboard | Complete |
+
+**T1** opens any entity and renders its complete multi-entity lifecycle on a shared time axis, with DF bottleneck highlighting, shared-event guides, and an interactive cluster-activity filter.
+
+**T2** reconstructs item-level traces, groups them into process variants, and shows a dominant-variant ranking alongside an activity DF graph. Compare mode places multiple entity lifelines on the same canvas with per-entity accent colours.
+
+**T3** renders a card grid of process variants derived directly from the item-level trace computation. Each card shows the activity sequence, case count, proportion bar, member and event statistics, and a date range. Clicking a card navigates to T2 with that variant pre-selected. This replaces the earlier label-propagation community clustering approach.
+
+**T4** lists shared-event hotspots (activities that appear in events correlated to 3 or more entities simultaneously) and drills into an analytics dashboard showing entity-count distribution, type-pair co-participation, and most-active entities for each hotspot.
+
 ## Four-Task Screen Architecture
 
 The viewer organises analysis around four task cards derived from Munzner (2014):
@@ -18,8 +37,8 @@ The viewer organises analysis around four task cards derived from Munzner (2014)
 |---|---|---|---|
 | T1 Lifecycle | `#/identify` | ⟨Identify, Path⟩ | Open one entity and read its full lifecycle on the shared time axis, including bottleneck waits. |
 | T2 Variants & Comparison | `#/compare` | ⟨Compare, Paths⟩ | Group entities by behaviour into variants, then place multiple lifelines on the same canvas. |
-| T3 Process Overview | `#/summarize` | ⟨Summarize, Topology⟩ | See how the dataset partitions into behavioural communities and identify outlier groups. |
-| T4 Shared Events | `#/explore` | ⟨Explore, Features⟩ | Find shared events where multiple entity lifecycles intersect. |
+| T3 Process Overview | `#/summarize` | ⟨Summarize, Topology⟩ | See how the dataset partitions into process variants; click any card to inspect that variant in detail. |
+| T4 Shared Events | `#/explore` | ⟨Explore, Features⟩ | Find shared events where three or more entity lifecycles intersect. |
 
 ### Hash-based navigation
 
@@ -29,8 +48,9 @@ The viewer uses hash-based routing. Every view state is a stable, shareable URL:
 http://localhost:8000/viewer/#/home
 http://localhost:8000/viewer/#/identify?entity=<id>
 http://localhost:8000/viewer/#/compare?entities=<id1>,<id2>
-http://localhost:8000/viewer/#/summarize?community=<id>
-http://localhost:8000/viewer/#/explore?hotspot=<activity>
+http://localhost:8000/viewer/#/compare?variant=<sequence-key>
+http://localhost:8000/viewer/#/summarize
+http://localhost:8000/viewer/#/explore?cluster=act:<activity>
 ```
 
 Opening the viewer at `http://localhost:8000/viewer/` redirects to `#/home`, where the four task cards are shown.
@@ -54,25 +74,29 @@ To add a new dataset, export a JSON bundle with the pipeline and add a new entry
 
 The prototype is built to address the thesis problem statement: how to lay out EKGs so that users can understand interacting entities, shared events, and process variants without collapsing the process back into a single-case log.
 
-The current implementation aligns with that goal in three ways:
+The current implementation aligns with that goal in four ways:
 
 1. It builds a typed EKG, not a flat log.
    Events, entities, correlations, directly-follows edges, and structural entity-to-entity relations are all preserved.
 
 2. It separates analysis into four coordinated screens.
-   The overview shows communities of similar cases, the variant view focuses on dominant item-level behaviour, the detail view shows a local multi-entity slice around one selected entity, and the shared-events screen surfaces synchronisation hotspots across entity types.
+   T1 shows a local multi-entity slice around one selected entity. T2 focuses on dominant item-level behaviour and side-by-side comparison. T3 shows the full variant distribution as an interactive card grid. T4 surfaces synchronisation hotspots where three or more entity types intersect.
 
 3. It emphasizes the layout requirements from the thesis.
    The detail view uses one horizontal time axis, one band per entity type, one lane per entity instance, explicit shared-event guides, clustered shared-event markers at the top, and optional DF and structural relation layers.
+
+4. The shared-event threshold is calibrated to the OCPM context.
+   T4 requires at least three entities in a shared event (not two), filtering out trivial two-entity co-occurrences that are normal baseline correlations in object-centric processes.
 
 In practical terms, the prototype supports:
 
 - locating and opening an arbitrary entity,
 - inspecting its local multi-entity context,
 - seeing where events are shared across entity timelines,
-- grouping similar cases into communities,
-- grouping similar item traces into variants,
-- drilling from overview or variants into detail.
+- browsing the full process-variant distribution as ranked cards,
+- comparing item traces that follow the same or different variants,
+- drilling from the variant overview into a detail comparison view,
+- exploring shared-event hotspots and their entity-type breakdown.
 
 ## Supported Datasets
 
@@ -128,7 +152,7 @@ bep/
         |-- data/
         |   |-- entityTypes.js <- dataset-agnostic entity-type registry
         |   |-- loader.js
-        |   `-- store.js
+        |   `-- store.js       <- store build, variant analytics, shared-event hotspot exports
         |-- layout/
         |   |-- detailLayout.js
         |   `-- overviewLayout.js
@@ -138,7 +162,9 @@ bep/
         |   `-- shared.js
         `-- screens/
             |-- home.js        <- T0 home screen with task cards
-            |-- explore.js     <- T4 shared-events hotspot list
+            |-- identify.js    <- T1 entity picker
+            |-- explore.js     <- T4 shared-events list and cluster detail dashboard
+            |-- summarize.js   <- T3 process variant card grid
             `-- sidebar.js     <- route-aware sidebar / topbar updater
 ```
 
@@ -332,7 +358,7 @@ At load time it:
 2. builds an in-memory store,
 3. derives analytical structures,
 4. computes layout geometry,
-5. renders SVG and interactive sidebar panels.
+5. renders SVG (T1, T2) or HTML dashboards (T3, T4) with interactive sidebar panels.
 
 The main analytical frontend files are:
 
@@ -364,62 +390,44 @@ Two modes are available in this screen:
 - Reconstructs item-level traces, groups identical sequences into variants, and ranks them by frequency.
 - A lower activity transition graph shows dominant paths.
 - Sidebar shows variant statistics, member list, and item list.
-- "Compare top N" button seeds the compare strip with the top variant members.
+- "Compare top N" button seeds the compare strip with the top variant's parent-level entities (Members / PurchaseOrders), not item-level entities.
 
-**Compare mode** (entered via the compare strip or a deep-link with `?entities=...`):
+**Compare mode** (entered via the compare strip, a deep-link with `?entities=...`, or the "View variant" button on T3):
 - Multiple entity lifelines are shown on the same canvas simultaneously.
 - Each entity gets an accent colour in the compare strip; its lane is highlighted on the canvas.
 - Entities can be added (by clicking any entity in the sidebar list) or removed via the strip's × button.
 
 ### T3 – Process Overview (`#/summarize`)
 
-Case-oriented overview of the whole dataset.
+Variant-based overview of the whole dataset, rendered as a scrollable HTML card grid.
 
-- Cases are grouped into communities through activity-cosine + resource-Jaccard + temporal similarity and weighted label propagation.
-- Communities are rendered as force-free shells; inter-community similarity edges connect them.
-- Clicking a community drills into it: individual case nodes appear inside the shell, non-member nodes and edges are soft-faded to 15 % opacity.
-- Focused mode shows resource and attribute satellites around the community.
-- Sidebar shows a community summary panel.
+- Each card represents one unique activity sequence (process variant).
+- Cards show: variant rank, activity sequence, case count, proportion bar relative to the dominant variant, member count, event total, average duration, and date range.
+- Cards are sorted by frequency; the dominant variant is visually distinguished.
+- Clicking any card navigates directly to T2 compare mode with that variant pre-selected.
+- The sidebar shows overall process statistics: variant count, total cases, dominant variant share, and average sequence length.
+- The activity filter in the sidebar applies to variant computation, narrowing both the card grid and statistics.
+
+This replaces the earlier label-propagation community clustering, which produced 80+ indistinguishable communities for BPIC19. The variant-based grouping uses the same trace reconstruction as T2, making T3 and T2 directly consistent.
 
 ### T4 – Shared Events (`#/explore`)
 
 Surfaces synchronisation hotspots across entity types.
 
-- The hotspot list shows all activities that appear in shared events, ranked by sync degree and entity-type diversity.
-- Clicking a hotspot deep-links into a detail view seeded with the most type-diverse entities for that activity.
+- The hotspot list shows activities that appear in shared events involving **three or more entity instances simultaneously** (two-entity events are filtered out as normal baseline correlations in object-centric processes).
+- Hotspots are ranked by event count, entity-type diversity, and sync degree.
+- Clicking a hotspot opens an analytics dashboard showing: entity-count distribution, entities by type, type-pair co-participation, and most-active entities for that activity.
 - Sidebar shows a hotspot summary panel with date range, entity type breakdown, and avg sync degree.
 
 ## Layout Algorithms
 
 This is the core contribution of the prototype.
 
-### Overview layout
+### T3 variant grouping
 
-The overview combines an analytical graph model with a deterministic spatial layout.
+T3 does not use a separate clustering step. It reuses the same `_collectItemSequences` computation as T2: item-level DF paths are reconstructed, grouped by exact activity sequence, and ranked by frequency. Each unique sequence is one "community". This gives semantically grounded groups with self-describing labels (the activity sequence itself), directly comparable to the T2 variant view, and stable regardless of graph topology changes.
 
-Analytical phase:
-
-- activity cosine similarity: 48%
-- resource Jaccard similarity: 18%
-- context Jaccard similarity: 18%
-- temporal similarity: 10%
-- size similarity: 6%
-
-Then:
-
-- only strong enough similarities are kept,
-- each case keeps only its local strongest neighbors,
-- weighted label propagation produces communities.
-
-Spatial phase:
-
-- communities are placed first,
-- community members are arranged inside their shells,
-- focused community mode exposes resources and attributes as side satellites.
-
-This avoids using an unconstrained force layout and produces a more stable analytical overview.
-
-### Variant layout
+### Variant layout (T2)
 
 The variant view reconstructs ordered item traces from DF edges, groups identical sequences, and renders:
 
@@ -428,7 +436,7 @@ The variant view reconstructs ordered item traces from DF edges, groups identica
 
 This view supports thesis-level process comparison at the item lifecycle level.
 
-### Detail layout
+### Detail layout (T1 and T2 compare mode)
 
 The detail layout is the most important algorithmic part of the repository.
 
@@ -469,22 +477,22 @@ The prototype is designed around the home screen as a starting point:
 
 1. open `#/home` to see dataset statistics and pick a task card,
 2. navigate into any of the four screens,
-3. drill down via entity / community / variant selection,
+3. drill down via entity / variant selection,
 4. use the home button (top-left) to return to the home screen at any time,
 5. use the breadcrumb to track the current task and entity context.
 
 The topbar is always visible and shows:
 
 - a home button,
-- a breadcrumb chip with the current task (T1–T4) and context entity or community,
+- a breadcrumb chip with the current task (T1–T4) and context entity or variant,
 - the active dataset name and a "Switch dataset" button,
-- Fit and Reset-zoom camera controls.
+- Fit and Reset-zoom camera controls (active in SVG screens T1/T2).
 
 The sidebar panels are route-aware: each panel is shown only on the routes where it is relevant. The sidebar can be resized by dragging its right edge.
 
 All view state is encoded in the URL hash, so browser back / forward navigation works correctly.
 
-The canvas is also keyboard navigable:
+The SVG canvas (T1, T2) is also keyboard navigable:
 
 - arrows or `WASD` to pan,
 - `+` and `-` to zoom,
@@ -514,6 +522,7 @@ That sequence matches the actual data flow from raw records to visual layout.
 - BPIC19 should be viewed through a sampled export, not the full browser bundle
 - `scripts/check_neo4j.py` checks connectivity against the default database, not a dataset database
 - The viewer is static and browser-only; it does not query Neo4j directly at runtime
+- T3 shows up to 30 variants by default; the activity filter can narrow the scope further
 
 ## Summary
 
@@ -526,4 +535,8 @@ This repository is a full prototype pipeline for thesis-driven EKG analysis:
 - the browser reconstructs analytical structure and computes the layouts,
 - four task-aligned screens cover Lifecycle (T1), Variants & Comparison (T2), Process Overview (T3), and Shared Events (T4).
 
-The main technical focus is the layout stack, especially the detail view: typed entity bands, a shared timeline, start/end lifecycle glyphs on the anchor entity, clustered shared-event rendering, per-entity DF structure, and interactive filtering for mixed shared-event clusters.
+**T1 and T2** render as interactive SVG canvases using the custom typed-band detail layout: entity types as horizontal bands, individual lifecycles as lanes, a shared time axis, bottleneck DF highlighting, shared-event guides, and optional correlation and structural relation layers.
+
+**T3** renders as a scrollable HTML card grid of process variants, each linking back to T2 for detailed comparison. This replaces the earlier label-propagation community clustering, which produced too many indistinguishable groups for large datasets.
+
+**T4** renders as a scrollable HTML analytics dashboard showing shared-event hotspots filtered to events with three or more entity types, surfacing genuine multi-entity synchronisation rather than trivial two-entity correlations.

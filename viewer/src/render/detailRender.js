@@ -32,6 +32,28 @@ export function drawDetailView(layout, lBg, lMeta, lDfPo, lCorr, lRes, lDfItem, 
 
   _drawAxis(layout.axis, layout.totalHeight, lBg, lLabels);
 
+  lBg.selectAll(null).data(layout.sharedClusterLanes ?? []).join("rect")
+    .attr("class", "shared-cluster-lane")
+    .attr("x", d => d.x)
+    .attr("y", d => d.y - d.height / 2)
+    .attr("width", d => d.width)
+    .attr("height", d => d.height)
+    .attr("rx", 8)
+    .attr("fill", (_, i) => i % 2 === 0 ? "rgba(219,234,254,0.30)" : "rgba(248,250,252,0.68)")
+    .attr("stroke", "rgba(37,99,235,0.12)")
+    .attr("stroke-width", 1)
+    .attr("pointer-events", "none");
+
+  lLabels.selectAll(null).data(layout.sharedClusterLanes ?? []).join("text")
+    .attr("class", "shared-cluster-lane-label")
+    .attr("x", DETAIL_PAD_X)
+    .attr("y", d => d.y + 3)
+    .attr("font-family", "JetBrains Mono, monospace")
+    .attr("font-size", "9px")
+    .attr("font-weight", "700")
+    .attr("fill", "rgba(30,64,175,0.72)")
+    .text(d => ellipsis(`${d.label} (${d.eventCount})`, 31));
+
   lMeta.selectAll(null).data(layout.anchorRail.filter(anchor => anchor.y < layout.axis.y - 6)).join("line")
     .attr("class", "event-stem")
     .attr("x1", d => d.x).attr("y1", d => d.y + d.r + 2)
@@ -43,15 +65,16 @@ export function drawDetailView(layout, lBg, lMeta, lDfPo, lCorr, lRes, lDfItem, 
     .attr("class", "event-stem event-stem-cluster")
     .attr("x1", d => d.x).attr("y1", d => d.y + d.height / 2 + 2)
     .attr("x2", d => d.x).attr("y2", layout.axis.y - 4)
-    .attr("stroke", "rgba(37,99,235,0.22)")
-    .attr("stroke-width", 1.25)
-    .attr("stroke-dasharray", "4 5");
+    .attr("stroke", "rgba(37,99,235,0.18)")
+    .attr("stroke-width", 1)
+    .attr("stroke-dasharray", "3 6");
 
   lMeta.selectAll(null).data(layout.sharedGuides).join("line")
     .attr("class", "shared-guide")
     .attr("x1", d => d.x).attr("y1", d => d.y1).attr("x2", d => d.x).attr("y2", d => d.y2)
-    .attr("stroke", "rgba(37,99,235,0.16)")
-    .attr("stroke-width", d => Math.min(1.6 + d.entityCount * 0.55, 4.5))
+    .attr("stroke", "rgba(37,99,235,0.24)")
+    .attr("stroke-width", d => Math.min(1.7 + d.entityCount * 0.45, 4.4))
+    .attr("stroke-dasharray", "5 4")
     .attr("stroke-linecap", "round");
 
   lMeta.selectAll(null).data(layout.relationLinks).join("path")
@@ -64,11 +87,22 @@ export function drawDetailView(layout, lBg, lMeta, lDfPo, lCorr, lRes, lDfItem, 
     .attr("stroke-dasharray", "5 4")
     .on("mousemove", (ev, d) => cb.onTooltipShow(
       `<div class="tip-title">${d.relation_type}</div><div class="tip-row">From: <b>${d.source_entity_id}</b></div><div class="tip-row">To: <b>${d.target_entity_id}</b></div>`,
-      ev.offsetX, ev.offsetY
+      ev
     ))
     .on("mouseleave", cb.onTooltipHide);
 
   layout.bands.forEach((band, bandIndex) => _drawBand(band, bandIndex, lBg, lMeta, lDfItem, lNodes, lLabels, cb));
+
+  lMeta.selectAll(null).data(layout.sharedEventClusters).join("rect")
+    .attr("class", "shared-cluster-band")
+    .attr("x", d => d.bandX).attr("y", d => d.bandY1)
+    .attr("width", d => d.bandWidth).attr("height", d => Math.max(24, d.bandY2 - d.bandY1))
+    .attr("rx", 9)
+    .attr("fill", "rgba(37,99,235,0.045)")
+    .attr("stroke", "rgba(37,99,235,0.16)")
+    .attr("stroke-width", 1)
+    .attr("stroke-dasharray", "2 6")
+    .attr("pointer-events", "none");
 
   lCorr.selectAll(null).data(layout.corrLinks).join("line")
     .attr("class", "corr-link")
@@ -91,7 +125,7 @@ export function drawDetailView(layout, lBg, lMeta, lDfPo, lCorr, lRes, lDfItem, 
         sharedEntityIds: d.sharedEntityIds,
       });
     })
-    .on("mousemove", (ev, d) => cb.onTooltipShow(_eventTooltip(d), ev.offsetX, ev.offsetY))
+    .on("mousemove", (ev, d) => cb.onTooltipShow(_eventTooltip(d), ev))
     .on("mouseleave", cb.onTooltipHide);
 
   anchorNodes.append("circle")
@@ -130,7 +164,7 @@ export function drawDetailView(layout, lBg, lMeta, lDfPo, lCorr, lRes, lDfItem, 
           sharedEntityIds: d.sharedEntityIds,
         });
     })
-    .on("mousemove", (ev, d) => cb.onTooltipShow(_sharedClusterTooltip(d), ev.offsetX, ev.offsetY))
+    .on("mousemove", (ev, d) => cb.onTooltipShow(_sharedClusterTooltip(d), ev))
     .on("mouseleave", cb.onTooltipHide);
 
   clusterNodes.append("rect")
@@ -139,9 +173,9 @@ export function drawDetailView(layout, lBg, lMeta, lDfPo, lCorr, lRes, lDfItem, 
     .attr("width", d => d.width)
     .attr("height", d => d.height)
     .attr("rx", d => Math.min(d.height / 2, 10))
-    .attr("fill", "rgba(255,255,255,0.94)")
-    .attr("stroke", "rgba(37,99,235,0.28)")
-    .attr("stroke-width", 1.2)
+    .attr("fill", "rgba(255,255,255,0.98)")
+    .attr("stroke", "rgba(37,99,235,0.46)")
+    .attr("stroke-width", 1.4)
     .attr("class", "event-cluster-shell");
 
   clusterNodes.append("rect")
@@ -150,9 +184,9 @@ export function drawDetailView(layout, lBg, lMeta, lDfPo, lCorr, lRes, lDfItem, 
     .attr("width", d => Math.max(d.width - 6, 18))
     .attr("height", d => Math.max(d.height - 6, 14))
     .attr("rx", d => Math.min((d.height - 6) / 2, 8))
-    .attr("fill", "rgba(219,234,254,0.9)")
-    .attr("stroke", "rgba(96,165,250,0.42)")
-    .attr("stroke-width", 1)
+    .attr("fill", "rgba(219,234,254,0.96)")
+    .attr("stroke", "rgba(37,99,235,0.58)")
+    .attr("stroke-width", 1.15)
     .attr("class", "event-cluster-core");
 
   clusterNodes.each(function(d) {
@@ -205,8 +239,9 @@ export function drawDetailView(layout, lBg, lMeta, lDfPo, lCorr, lRes, lDfItem, 
 }
 
 function _detailModeLabel(scope) {
-  if (scope === "item-focus") return "BOOK / ITEM FOCUS";
-  if (scope === "case-focus") return "MEMBER / CASE FOCUS";
+  if (scope === "item-focus")      return "BOOK / ITEM FOCUS";
+  if (scope === "case-focus")      return "MEMBER / CASE FOCUS";
+  if (scope === "explore-cluster") return "T4 · SHARED-EVENT CLUSTER";
   return "MULTI-ENTITY DETAIL";
 }
 
@@ -290,7 +325,7 @@ function _drawLane(lane, bandColor, lBg, lMeta, lDfItem, lNodes, lLabels, cb) {
     .attr("rx", 10).attr("fill", rowFill).attr("stroke", rowStroke).attr("stroke-width", 1)
     .style("cursor", "pointer")
     .on("click", () => cb.onEntitySelect?.(lane.entity_id))
-    .on("mousemove", ev => cb.onTooltipShow(_laneTooltip(lane), ev.offsetX, ev.offsetY))
+    .on("mousemove", ev => cb.onTooltipShow(_laneTooltip(lane), ev))
     .on("mouseleave", cb.onTooltipHide);
 
   lNodes.append("rect")
@@ -319,6 +354,16 @@ function _drawLane(lane, bandColor, lBg, lMeta, lDfItem, lNodes, lLabels, cb) {
       cb.onEntitySelect?.(lane.entity_id);
     });
 
+  lDfItem.selectAll(null).data(lane.dfEdges.filter(edge => edge.isBottleneck)).join("path")
+    .attr("class", "df-link-bottleneck-halo")
+    .attr("data-edge-id", d => `${lane.entity_id}__${d.source_event_id}__${d.target_event_id}`)
+    .attr("d", d => `M${d.x1},${d.y1} Q${d.cx},${d.cy} ${d.x2},${d.y2}`)
+    .attr("fill", "none")
+    .attr("stroke", "rgba(217,119,6,0.24)")
+    .attr("stroke-width", 8)
+    .attr("stroke-linecap", "round")
+    .attr("pointer-events", "none");
+
   lDfItem.selectAll(null).data(lane.dfEdges).join("path")
     .attr("class", d => d.isBottleneck ? "df-link df-link-bottleneck" : "df-link")
     .attr("data-edge-id", d => `${lane.entity_id}__${d.source_event_id}__${d.target_event_id}`)
@@ -327,9 +372,11 @@ function _drawLane(lane, bandColor, lBg, lMeta, lDfItem, lNodes, lLabels, cb) {
     .attr("data-target-id", d => d.target_event_id)
     .attr("d", d => `M${d.x1},${d.y1} Q${d.cx},${d.cy} ${d.x2},${d.y2}`)
     .attr("fill", "none")
-    .attr("stroke", d => d.isBottleneck ? "#d97706" : bandColor)
-    .attr("stroke-width", d => d.isBottleneck ? 2.2 : 1.3)
-    .attr("stroke-dasharray", d => d.isBottleneck ? "6 4" : null)
+    .attr("stroke", d => d.isBottleneck ? "#b45309" : rgba(bandColor, 0.92))
+    .attr("stroke-width", d => d.isBottleneck ? 3.6 : 2.2)
+    .attr("stroke-dasharray", null)
+    .attr("stroke-linecap", "round")
+    .attr("stroke-linejoin", "round")
     .style("cursor", "pointer")
     .on("click", (ev, d) => {
       ev.stopPropagation();
@@ -342,7 +389,7 @@ function _drawLane(lane, bandColor, lBg, lMeta, lDfItem, lNodes, lLabels, cb) {
     })
     .on("mousemove", (ev, d) => cb.onTooltipShow(
       `<div class="tip-title">DF edge</div><div class="tip-row">Entity: <b>${lane.entityLabel}</b></div><div class="tip-row">From: <b>${d.sourceActivity}</b></div><div class="tip-row">To: <b>${d.targetActivity}</b></div><div class="tip-row">Gap: <b>${formatGapHours(d.gapHours)}</b></div><div class="tip-row">Bottleneck: <b>${d.isBottleneck ? "Yes" : "No"}</b></div>`,
-      ev.offsetX, ev.offsetY
+      ev
     ))
     .on("mouseleave", cb.onTooltipHide);
 
@@ -359,7 +406,7 @@ function _drawLane(lane, bandColor, lBg, lMeta, lDfItem, lNodes, lLabels, cb) {
         sharedEntityIds: d.anchor?.sharedEntityIds ?? [lane.entity_id],
       });
     })
-    .on("mousemove", (ev, d) => cb.onTooltipShow(_membershipTooltip(lane, d.anchor), ev.offsetX, ev.offsetY))
+    .on("mousemove", (ev, d) => cb.onTooltipShow(_membershipTooltip(lane, d.anchor), ev))
     .on("mouseleave", cb.onTooltipHide);
 
   markers.append("circle")
@@ -397,10 +444,7 @@ function _sharedClusterTooltip(cluster) {
     .join(", ");
   const eventPreview = cluster.eventIds.slice(0, 5).join(", ");
   const eventTail = cluster.eventIds.length > 5 ? ` (+${cluster.eventIds.length - 5} more)` : "";
-  const filterHint = cluster.activityCounts.length > 1
-    ? `<div class="tip-row" style="margin-top:5px;color:var(--accent);font-size:10px">Click to open event-type filters for this cluster</div>`
-    : "";
-  return `<div class="tip-title">Shared-event cluster</div><div class="tip-row">Events: <b>${cluster.eventCount}</b></div><div class="tip-row">Entities: <b>${cluster.sharedEntityCount}</b></div><div class="tip-row">Entity types: <b>${cluster.entityTypes.join(", ") || "n/a"}</b></div><div class="tip-row">Time span: <b>${timeLabel}</b></div><div class="tip-row">Top activities: <b>${topActivities || "n/a"}</b></div>${filterHint}<div class="tip-divider"></div><div class="tip-row">Event ids: <b>${eventPreview}${eventTail}</b></div>`;
+  return `<div class="tip-title">Shared-event cluster</div><div class="tip-row">Events: <b>${cluster.eventCount}</b></div><div class="tip-row">Entities: <b>${cluster.sharedEntityCount}</b></div><div class="tip-row">Entity types: <b>${cluster.entityTypes.join(", ") || "n/a"}</b></div><div class="tip-row">Time span: <b>${timeLabel}</b></div><div class="tip-row">Top activities: <b>${topActivities || "n/a"}</b></div><div class="tip-row" style="margin-top:5px;color:var(--accent);font-size:10px">Click to isolate this shared-event cluster</div><div class="tip-divider"></div><div class="tip-row">Event ids: <b>${eventPreview}${eventTail}</b></div>`;
 }
 
 function _laneTooltip(lane) {

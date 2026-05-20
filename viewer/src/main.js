@@ -2,27 +2,28 @@
 
 import { loadDataset, loadManifest, datasetUrl, datasetFromQuery } from "./data/loader.js";
 import {
-  buildStore, getStore, getOverviewGraph, getVariantOverview,
-  getActivityDfGraph, getDetailGraph, getGlobalSharedEventHotspots, getEntitiesForHotspot,
+  buildStore, getStore, getVariantOverview, getTypeEKGGraph,
+  getActivityDfGraph, getDetailGraph, getGlobalSharedEventHotspots, getSharedEventOverview, getEntitiesForHotspot,
 } from "./data/store.js";
 import { computeDetailLayout } from "./layout/detailLayout.js";
-import { computeOverviewNetworkLayout, computeVariantLayout, computeDfGraphLayout } from "./layout/overviewLayout.js";
+import { computeVariantLayout, computeDfGraphLayout, computeTypeEKGLayout } from "./layout/overviewLayout.js";
 import { drawDetailView } from "./render/detailRender.js";
-import { drawOverviewNetwork, drawVariantOverview } from "./render/overviewRender.js";
+import { drawVariantOverview, drawTypeEKGView } from "./render/overviewRender.js";
 import {
-  addMarkers, wheelDelta, computeFitTransform, clusterColor, formatPercent,
+  addMarkers, wheelDelta, computeFitTransform, formatPercent,
   ZOOM_MIN_SCALE, ZOOM_MAX_SCALE, CAMERA_EASE_MS,
 } from "./render/shared.js";
-import { startRouter, getRoute, navigate } from "./router.js";
+import { startRouter, getRoute, navigate, goBack } from "./router.js";
 import { renderHome } from "./screens/home.js";
 import { renderIdentifyPicker } from "./screens/identify.js";
-import { renderExploreList, updateHotspotSummary } from "./screens/explore.js";
+import { renderExploreList, renderExploreClusterDetail, updateHotspotSummary } from "./screens/explore.js";
+import { renderSummarizeScreen, updateSummarizeSidebar } from "./screens/summarize.js";
 import { updateSidebarRoute, updateTopbar, renderCompareStrip } from "./screens/sidebar.js";
 
 // ── SVG / camera ──────────────────────────────────────────────────────────────
 let svg, gRoot, zoom, currentTransform;
 const vis = { df: true, corr: true, relations: true, sync: true, bottleneck: true };
-const opa = { df: 0.78, corr: 0.22, relations: 0.4 };
+const opa = { df: 1, corr: 0.22, relations: 0.4 };
 const KEYBOARD_PAN_SPEED = 880;
 const KEYBOARD_ZOOM_RATE = 1.75;
 const TRACKPAD_PAN_THRESHOLD = 80;
@@ -35,6 +36,7 @@ let _manifest = { datasets: [] };
 let _lastTotalHeight = 0;
 let _detailGraph = null;
 let _variantData = null;
+let _tekgData = null;
 let _selection = null;
 let _entitySearchQuery = "";
 let _lastListKey = null;
@@ -42,10 +44,13 @@ let _resizeTimer = null;
 let _keyboardCameraKeys = new Set();
 let _keyboardCameraFrame = null;
 let _keyboardCameraLastTs = 0;
+let _minZoomScale = ZOOM_MIN_SCALE;
 let _clusterActivityContext = null;
+let _isolatedClusterContext = null;
 let _compareEntityIds = [];
 let _compareMode = "variants";
 let _accentMap = {};
+let _selectionRaf = null;
 const ACCENT_COLORS = ["#7c3aed", "#ea580c", "#059669", "#dc2626", "#0891b2"];
 let _filters = {
   activities: null,
@@ -73,9 +78,6 @@ async function init() {
         `translate(${e.transform.x}px,${e.transform.y}px) scale(${e.transform.k})`);
     });
 
-  svg.call(zoom);
-  svg.on("wheel.zoom", null);
-  svg.on("dblclick.zoom", null);
   svg.on("click.selection-clear", ev => { if (ev.target === svgEl) _clearSelection(); });
 
   _setupTooltip();
@@ -118,11 +120,13 @@ function _afterLoad(store, name) {
   _filters.visibleEntityTypes = null;
   _filters.sharedOnly = false;
   _clusterActivityContext = null;
+  _isolatedClusterContext = null;
   _compareEntityIds = [];
   _compareMode = "variants";
   _accentMap = {};
   _detailGraph = null;
   _variantData = null;
+  _tekgData = null;
   _selection = null;
   _entitySearchQuery = "";
   _lastListKey = null;
@@ -148,10 +152,11 @@ function handleRoute(route) {
     route.name === "identify" && route.params.entity
   ) || (
     route.name === "compare" && _compareMode === "compare" && route.params.entities
-  ) || (
-    route.name === "explore" && route.params.cluster
   );
-  if (!shouldKeepClusterContext) _clusterActivityContext = null;
+  if (!shouldKeepClusterContext) {
+    _clusterActivityContext = null;
+    _isolatedClusterContext = null;
+  }
   _selection = null;
 
   const store = (() => { try { return getStore(); } catch { return null; } })();
@@ -169,7 +174,7 @@ function handleRoute(route) {
 
   // Determine if this route uses the DOM screen-host
   const isDomScreen = route.name === "home"
-    || (route.name === "explore" && !route.params.cluster)
+    || route.name === "explore"
     || (route.name === "identify" && !route.params.entity);
   if (screenHost) screenHost.classList.toggle("hidden", !isDomScreen);
   if (canvas) canvas.style.display = isDomScreen ? "none" : "";
@@ -182,6 +187,7 @@ function handleRoute(route) {
 
 function _renderLayers(route, store) {
   gRoot.selectAll("*").remove();
+  _updateClusterIsolationControl(null);
   const lBg    = gRoot.append("g").attr("class", "l-bg");
   const lMeta  = gRoot.append("g").attr("class", "l-meta");
   const lRel   = gRoot.append("g").attr("class", "l-relations");
@@ -211,14 +217,16 @@ function _renderLayers(route, store) {
         maxEntitiesPerType: _filters.maxEntitiesPerType,
         sharedOnly: _filters.sharedOnly,
       });
-      const layout = computeDetailLayout(_detailGraph, w);
+      const renderGraph = _resolveDetailRenderGraph(_detailGraph);
+      const layout = computeDetailLayout(renderGraph, w);
       drawDetailView(layout, lBg, lMeta, lRel, lCorr, lMeta, lDf, lNodes, lLabels, vis, cb);
       _lastTotalHeight = layout.totalHeight;
       _applyVisibility();
       _applySelectionState();
       _fitDetailView();
-      _updateDetailPanels(_detailGraph);
-      _updateClusterActivityPanel(_detailGraph);
+      _updateDetailPanels(renderGraph);
+      _updateClusterActivityPanel(renderGraph);
+      _updateClusterIsolationControl(renderGraph);
       _syncMaxEntitiesSlider(_detailGraph);
       _renderEntityTypeFilters(_detailGraph);
       _highlightAnchorLane(entityId);
@@ -239,19 +247,18 @@ function _renderLayers(route, store) {
       break;
     }
     case "summarize": {
-      const communityId = route.params.community ?? null;
-      const overviewGraph = getOverviewGraph({ activities: _filters.activities, communityId });
-      const layout = computeOverviewNetworkLayout(overviewGraph, w);
-      drawOverviewNetwork(layout.network, lBg, lMeta, lNodes, lLabels, vis, cb, labels);
-      _lastTotalHeight = layout.totalHeight;
+      _tekgData = getTypeEKGGraph({ activities: _filters.activities });
+      const tekgLayout = computeTypeEKGLayout(_tekgData, w);
+      drawTypeEKGView(tekgLayout, lBg, lMeta, lNodes, lLabels, cb);
+      _lastTotalHeight = tekgLayout.totalHeight;
       _applyVisibility();
       _fitToView(_lastTotalHeight);
-      _updateOverviewPanels(overviewGraph);
+      updateSidebarRoute(route, { compareMode: _compareMode, exploreDrilled: false });
+      updateSummarizeSidebar(_tekgData);
       _updateDetailPanels(null);
       _updateVariantPanels(null, null);
       _updateClusterActivityPanel(null);
       _syncMaxEntitiesSlider(null);
-      if (communityId) _addOutlierBadges(overviewGraph);
       break;
     }
     case "explore": {
@@ -259,8 +266,9 @@ function _renderLayers(route, store) {
       if (clusterId) {
         _renderExploreDetail(route, store, w, lBg, lMeta, lRel, lCorr, lDf, lNodes, lLabels, cb, clusterId);
       } else {
-        const hotspots = getGlobalSharedEventHotspots({ activities: _filters.activities });
-        renderExploreList(hotspots);
+        const hotspots = getGlobalSharedEventHotspots({ activities: _filters.activities, minSharedEntities: 3 });
+        const sharedOverview = getSharedEventOverview({ activities: _filters.activities, limit: 10, minSharedEntities: 3 });
+        renderExploreList(hotspots, sharedOverview);
         updateSidebarRoute(route, { compareMode: _compareMode, exploreDrilled: false });
       }
       break;
@@ -298,9 +306,9 @@ function _renderVariants(route, store, w, lBg, lNodes, lLabels, cb) {
     })),
   };
   drawVariantOverview(variantLayout, dfLayout, variantData, lBg, lNodes, lLabels, cb, selectedVariant);
-  _lastTotalHeight = variantLayout.totalHeight + 34 + dfInnerH + (selectedVariant ? 178 : 26);
-  _fitToView(_lastTotalHeight);
-  _updateOverviewPanels(null);
+  _lastTotalHeight = variantLayout.totalHeight + 34 + dfInnerH + 28;
+  _fitVariantView();
+  updateSummarizeSidebar(null);
   _updateVariantPanels(variantData, selectedVariant);
   _updateDetailPanels(null);
   _syncMaxEntitiesSlider(null);
@@ -327,14 +335,16 @@ function _renderCompareDetail(route, store, w, lBg, lMeta, lRel, lCorr, lDf, lNo
     maxEntitiesPerType: _filters.maxEntitiesPerType,
     sharedOnly: _filters.sharedOnly,
   });
-  const layout = computeDetailLayout(_detailGraph, w);
+  const renderGraph = _resolveDetailRenderGraph(_detailGraph);
+  const layout = computeDetailLayout(renderGraph, w);
   drawDetailView(layout, lBg, lMeta, lRel, lCorr, lMeta, lDf, lNodes, lLabels, vis, cb);
   _lastTotalHeight = layout.totalHeight;
   _applyVisibility();
   _applySelectionState();
   _fitDetailView();
-  _updateDetailPanels(_detailGraph);
-  _updateClusterActivityPanel(_detailGraph);
+  _updateDetailPanels(renderGraph);
+  _updateClusterActivityPanel(renderGraph);
+  _updateClusterIsolationControl(renderGraph);
   _syncMaxEntitiesSlider(_detailGraph);
   _renderEntityTypeFilters(_detailGraph);
   _highlightAnchorLane(anchorId);
@@ -342,8 +352,13 @@ function _renderCompareDetail(route, store, w, lBg, lMeta, lRel, lCorr, lDf, lNo
 }
 
 function _renderExploreDetail(route, store, w, lBg, lMeta, lRel, lCorr, lDf, lNodes, lLabels, cb, clusterId) {
+  _updateDetailPanels(null);
   const entityIds = getEntitiesForHotspot(clusterId, { maxEntities: EXPLORE_ENTITY_LIMIT });
-  if (!entityIds.length) return;
+  if (!entityIds.length) {
+    const host = document.getElementById("screen-host");
+    if (host) host.innerHTML = `<div style="padding:48px 32px;color:var(--text-muted,#94a3b8);font-size:14px">No entity data found for this cluster.</div>`;
+    return;
+  }
   const anchorId = entityIds[0];
   const compareIds = entityIds.slice(1);
   const maxEntitiesPerType = Number.isFinite(_filters.maxEntitiesPerType)
@@ -356,39 +371,19 @@ function _renderExploreDetail(route, store, w, lBg, lMeta, lRel, lCorr, lDf, lNo
     activities: _effectiveDetailActivities(),
     maxEntitiesPerType,
     sharedOnly: true,
+    minSharedEntities: 3,
   });
-  const layout = computeDetailLayout(_detailGraph, w);
-  drawDetailView(layout, lBg, lMeta, lRel, lCorr, lMeta, lDf, lNodes, lLabels, vis, cb);
-  _lastTotalHeight = layout.totalHeight;
-  _applyVisibility();
-  _applySelectionState();
-  _fitDetailView();
-  _updateDetailPanels(_detailGraph);
-  _updateClusterActivityPanel(_detailGraph);
+  const renderGraph = _resolveDetailRenderGraph(_detailGraph);
+  renderExploreClusterDetail(renderGraph);
+  _updateClusterActivityPanel(renderGraph);
   _syncMaxEntitiesSlider(_detailGraph);
   _renderEntityTypeFilters(_detailGraph);
-  _highlightAnchorLane(anchorId);
-  _highlightFocusedCluster(clusterId);
 
-  const hotspots = getGlobalSharedEventHotspots();
+  const hotspots = getGlobalSharedEventHotspots({ minSharedEntities: 3 });
   const hotspot = hotspots.find(h => h.id === clusterId);
   if (hotspot) updateHotspotSummary(hotspot);
 }
 
-function _addOutlierBadges(overviewGraph) {
-  if (!overviewGraph?.clusters?.length) return;
-  const sizes = overviewGraph.clusters.map(c => c.nodeIds.length).sort((a, b) => a - b);
-  const p10 = sizes[Math.floor(sizes.length * 0.1)] ?? 0;
-  gRoot.selectAll(".cluster-label-group").each(function(d) {
-    if (d?.nodeIds?.length <= p10 && d.nodeIds.length > 0) {
-      d3.select(this).append("text")
-        .attr("y", -12).attr("text-anchor", "middle")
-        .attr("font-size", "8px").attr("font-weight", "700")
-        .attr("fill", "#b45309")
-        .text("outlier");
-    }
-  });
-}
 
 function _highlightAnchorLane(anchorId) {
   gRoot.selectAll(".entity-lane")
@@ -426,14 +421,23 @@ function _makeCallbacks(route) {
     onTooltipHide: _hideTooltip,
     onPoSelect: entityId => navigate("identify", { entity: entityId }),
     onEntitySelect: entityId => navigate("identify", { entity: entityId }),
-    onCommunitySelect: communityId => navigate("summarize", { community: communityId }),
     onVariantSelect: variantKey => {
       const current = route.params.variant;
       if (current === variantKey) navigate("compare");
       else navigate("compare", { variant: variantKey });
     },
+    onDfExpand: () => _openActivityFlowModal(),
+    onActivitySelect: activity => navigate("explore", { cluster: `act:${activity}` }),
+    onEntityTypeSelect: type => {
+      const s = getStore();
+      const rep = s?.entities?.find(e => e.primary_type === type);
+      if (rep) navigate("identify", { entity: rep.id });
+    },
     onEventSelect: d => {
-      if (d?.kind === "event-cluster") _setClusterActivityContext(d);
+      if (d?.kind === "event-cluster") {
+        _openClusterIsolation(d);
+        return;
+      }
       _toggleSelection(d?.kind === "event-cluster"
         ? { kind: "event-cluster", eventIds: d.ids ?? [], relatedEntityIds: d.sharedEntityIds ?? [] }
         : { kind: "event", eventId: d.id, relatedEntityIds: d.sharedEntityIds ?? [] });
@@ -448,6 +452,7 @@ function _makeCallbacks(route) {
 // ── Top-bar setup ─────────────────────────────────────────────────────────────
 function _setupTopbar() {
   document.getElementById("btn-home")?.addEventListener("click", () => navigate("home"));
+  document.getElementById("btn-back")?.addEventListener("click", () => _goBackFromCurrentRoute());
 
   const switchBtn = document.getElementById("btn-switch-dataset");
   switchBtn?.addEventListener("click", () => _openDatasetModal());
@@ -502,6 +507,18 @@ function _setupTopbar() {
   });
 }
 
+function _goBackFromCurrentRoute() {
+  const route = getRoute();
+  const fallback = route.name === "identify" && route.params.entity
+    ? { name: "identify" }
+    : route.name === "compare" && (route.params.variant || route.params.entities)
+      ? { name: "compare" }
+      : route.name === "explore" && route.params.cluster
+        ? { name: "explore" }
+        : { name: "home" };
+  goBack(fallback);
+}
+
 function _openDatasetModal() {
   const modal = document.getElementById("dataset-modal");
   const list  = document.getElementById("dataset-modal-list");
@@ -531,6 +548,80 @@ function _closeDatasetModal() {
   document.getElementById("dataset-modal")?.classList.add("hidden");
 }
 
+function _openActivityFlowModal() {
+  if (!_variantData?.dfGraph) return;
+  const wrap = document.getElementById("canvas-wrap");
+  if (!wrap) return;
+  document.getElementById("activity-flow-modal")?.remove();
+  const modal = document.createElement("div");
+  modal.id = "activity-flow-modal";
+  modal.className = "modal-overlay activity-flow-overlay";
+  modal.innerHTML = `
+    <div class="modal-card activity-flow-card">
+      <div class="modal-header">
+        <span class="modal-title">Activity flow detail</span>
+        <button type="button" class="modal-close" id="btn-close-activity-flow" aria-label="Close">x</button>
+      </div>
+      <div class="activity-flow-modal-body">
+        <svg id="activity-flow-modal-svg" class="activity-flow-modal-svg" aria-label="Expanded activity flow graph"></svg>
+      </div>
+    </div>
+  `;
+  wrap.appendChild(modal);
+  const close = () => modal.remove();
+  modal.addEventListener("click", event => { if (event.target === modal) close(); });
+  modal.querySelector("#btn-close-activity-flow")?.addEventListener("click", close);
+  _drawActivityFlowModal(modal.querySelector("#activity-flow-modal-svg"), _variantData.dfGraph);
+}
+
+function _drawActivityFlowModal(svgEl, dfGraph) {
+  if (!svgEl) return;
+  const width = Math.max(880, svgEl.clientWidth || 980);
+  const height = Math.max(520, svgEl.clientHeight || 560);
+  const layout = computeDfGraphLayout(dfGraph, width - 56, height - 62);
+  const root = d3.select(svgEl)
+    .attr("viewBox", `0 0 ${width} ${height}`)
+    .attr("width", "100%")
+    .attr("height", "100%");
+  root.selectAll("*").remove();
+  const g = root.append("g").attr("transform", "translate(28,34)");
+  const maxEdgeCount = Math.max(...layout.edges.map(edge => edge.count), 1);
+  const maxNodeCount = Math.max(...layout.nodes.map(node => node.count), 1);
+  g.selectAll(".modal-df-edge").data(layout.edges).join("path")
+    .attr("class", "modal-df-edge")
+    .attr("d", d => `M${d.x1},${d.y1} Q${d.cx},${d.cy} ${d.x2},${d.y2}`)
+    .attr("fill", "none")
+    .attr("stroke", "rgba(37,99,235,0.32)")
+    .attr("stroke-width", d => 1.4 + (d.count / maxEdgeCount) * 6)
+    .attr("stroke-linecap", "round");
+  const nodes = g.selectAll(".modal-df-node").data(layout.nodes).join("g")
+    .attr("class", "modal-df-node")
+    .attr("transform", d => `translate(${d.x},${d.y})`);
+  nodes.append("circle")
+    .attr("r", d => 12 + (d.count / maxNodeCount) * 18)
+    .attr("fill", "rgba(37,99,235,0.14)")
+    .attr("stroke", "rgba(37,99,235,0.62)")
+    .attr("stroke-width", 1.6);
+  nodes.append("text")
+    .attr("text-anchor", "middle")
+    .attr("dy", "0.34em")
+    .attr("font-family", "JetBrains Mono, monospace")
+    .attr("font-size", "10px")
+    .attr("font-weight", "800")
+    .attr("fill", "#1e3a8a")
+    .text(d => d.count);
+  g.selectAll(".modal-df-label").data(layout.nodes).join("text")
+    .attr("class", "modal-df-label")
+    .attr("x", d => d.x)
+    .attr("y", d => d.y + 38)
+    .attr("text-anchor", "middle")
+    .attr("font-family", "Inter, system-ui, sans-serif")
+    .attr("font-size", "11px")
+    .attr("font-weight", "650")
+    .attr("fill", "#334155")
+    .text(d => d.label);
+}
+
 // ── Tooltip ───────────────────────────────────────────────────────────────────
 function _setupTooltip() {
   document.getElementById("canvas-wrap")?.addEventListener("mouseleave", () =>
@@ -540,17 +631,35 @@ function _setupTooltip() {
 
 function _showTooltip(html, x, y) {
   const tip = document.getElementById("tooltip");
-  if (!tip) return;
-  tip.innerHTML = html;
   const wrap = document.getElementById("canvas-wrap");
-  const rect = wrap.getBoundingClientRect();
+  if (!tip || !wrap) return;
+
+  const coords = (x && typeof x === "object" && Number.isFinite(x.clientX))
+    ? _tooltipCoordsFromEvent(x, wrap)
+    : { x: Number(x) || 0, y: Number(y) || 0 };
+  const wrapW = wrap.clientWidth;
+  const wrapH = wrap.clientHeight;
+
+  if (tip.__lastHtml !== html) {
+    tip.innerHTML = html;
+    tip.__lastHtml = html;
+  }
+
   const tipW = tip.offsetWidth || 240;
   const tipH = tip.offsetHeight || 100;
-  const left = x + tipW + 16 > rect.width  ? x - tipW - 10 : x + 14;
-  const top  = y + tipH + 16 > rect.height ? y - tipH - 10 : y + 14;
+  const left = coords.x + tipW + 16 > wrapW ? coords.x - tipW - 10 : coords.x + 14;
+  const top  = coords.y + tipH + 16 > wrapH ? coords.y - tipH - 10 : coords.y + 14;
   tip.style.left = `${left}px`;
   tip.style.top  = `${top}px`;
   tip.classList.add("show");
+}
+
+function _tooltipCoordsFromEvent(event, wrap) {
+  const rect = wrap.getBoundingClientRect();
+  return {
+    x: event.clientX - rect.left,
+    y: event.clientY - rect.top,
+  };
 }
 
 function _hideTooltip() {
@@ -569,10 +678,12 @@ function _setupEdgeControls() {
   const slider = document.getElementById("slider-max-entities");
   const sliderVal = document.getElementById("slider-max-entities-val");
   slider?.addEventListener("input", () => {
+    if (sliderVal) sliderVal.textContent = slider.value;
+  });
+  slider?.addEventListener("change", () => {
     const next = parseInt(slider.value, 10);
     const max  = parseInt(slider.max || slider.value, 10);
     _filters.maxEntitiesPerType = next >= max ? null : next;
-    if (sliderVal) sliderVal.textContent = slider.value;
     const route = getRoute();
     if (route.name === "identify" || (route.name === "compare" && _compareMode === "compare") || (route.name === "explore" && route.params.cluster)) handleRoute(route);
   });
@@ -605,14 +716,37 @@ function _setupEdgeControls() {
     if (valEl && el) valEl.textContent = el.value;
   });
 
-  document.getElementById("btn-add-compare-entity")?.addEventListener("click", () => {
-    const id = prompt("Enter entity ID to add to comparison:");
-    if (!id) return;
+  const compareInput = document.getElementById("compare-add-input");
+  const compareResults = document.getElementById("compare-add-results");
+  compareInput?.addEventListener("input", () => {
+    const q = compareInput.value.trim().toLowerCase();
+    if (!q) { compareResults.classList.add("hidden"); return; }
+    let store;
+    try { store = getStore(); } catch { return; }
     const route = getRoute();
-    const current = (route.params.entities ?? "").split(",").filter(Boolean);
-    if (!current.includes(id)) {
-      navigate("compare", { entities: [...current, id].join(",") });
-    }
+    const existing = new Set((route.params.entities ?? "").split(",").filter(Boolean));
+    const hits = store.entityList
+      .filter(it => !existing.has(it.id) && (it.label.toLowerCase().includes(q) || it.id.toLowerCase().includes(q) || it.type.toLowerCase().includes(q)))
+      .slice(0, 8);
+    if (!hits.length) { compareResults.classList.add("hidden"); return; }
+    compareResults.innerHTML = hits.map(it =>
+      `<div class="compare-result-row" data-id="${_escAttr(it.id)}"><span class="compare-result-label">${_escHtml(it.label)}</span><span class="compare-result-type">${_escHtml(it.type)}</span></div>`
+    ).join("");
+    compareResults.querySelectorAll(".compare-result-row").forEach(row => {
+      row.addEventListener("click", () => {
+        const r = getRoute();
+        const cur = (r.params.entities ?? "").split(",").filter(Boolean);
+        if (!cur.includes(row.dataset.id)) {
+          navigate("compare", { entities: [...cur, row.dataset.id].join(",") });
+        }
+        compareInput.value = "";
+        compareResults.classList.add("hidden");
+      });
+    });
+    compareResults.classList.remove("hidden");
+  });
+  compareInput?.addEventListener("blur", () => {
+    setTimeout(() => compareResults?.classList.add("hidden"), 160);
   });
 }
 
@@ -634,7 +768,7 @@ function _buildActivityList(store) {
     const id = `act-${i}`;
     const item = document.createElement("div");
     item.className = "act-item";
-    item.innerHTML = `<input type="checkbox" id="${id}" checked><span class="act-swatch" style="background:${actColors[activity] ?? "#64748b"}"></span><label for="${id}">${activity}</label><span class="act-count">${store.events.filter(e => e.activity === activity).length}</span>`;
+    item.innerHTML = `<input type="checkbox" id="${id}" checked><span class="act-swatch" style="background:${actColors[activity] ?? "#64748b"}"></span><label for="${id}">${activity}</label><span class="act-count">${store.activityEventCount?.[activity] ?? 0}</span>`;
     item.querySelector("input").addEventListener("change", () => _onActivityToggle(activity, item.querySelector("input").checked));
     container.appendChild(item);
   });
@@ -704,70 +838,32 @@ function _setupCanvasKeyboard() {
   const wrap = document.getElementById("canvas-wrap");
   if (!wrap) return;
   wrap.addEventListener("pointerdown", () => wrap.focus({ preventScroll: true }));
-  wrap.addEventListener("wheel", _handleCanvasWheel, { passive: false });
   wrap.addEventListener("keydown", event => {
     const action = _keyboardCameraAction(event);
     if (!action) return;
-    event.preventDefault();
     if (action === "fit") { _fitCurrentView(); return; }
     if (action === "reset") { _resetZoom(); return; }
-    _keyboardCameraKeys.add(action);
-    _startKeyboardCameraLoop();
-  });
-  wrap.addEventListener("keyup", event => {
-    const action = _keyboardCameraAction(event);
-    if (!action || action === "fit" || action === "reset") return;
     event.preventDefault();
-    _keyboardCameraKeys.delete(action);
-    if (!_keyboardCameraKeys.size) _stopKeyboardCameraLoop();
   });
-  wrap.addEventListener("blur", _clearKeyboardCamera);
-  window.addEventListener("blur", _clearKeyboardCamera);
   window.addEventListener("keydown", event => {
     if (event.defaultPrevented) return;
     if (!_isCanvasRouteActive() || _isTypingTarget(event.target)) return;
     const action = _keyboardCameraAction(event);
-    if (!action) return;
+    if (action !== "fit" && action !== "reset") return;
     event.preventDefault();
     wrap.focus({ preventScroll: true });
     if (action === "fit") { _fitCurrentView(); return; }
     if (action === "reset") { _resetZoom(); return; }
-    _keyboardCameraKeys.add(action);
-    _startKeyboardCameraLoop();
-  });
-  window.addEventListener("keyup", event => {
-    if (event.defaultPrevented) return;
-    const action = _keyboardCameraAction(event);
-    if (!action || action === "fit" || action === "reset") return;
-    _keyboardCameraKeys.delete(action);
-    if (!_keyboardCameraKeys.size) _stopKeyboardCameraLoop();
   });
 }
 
 function _handleCanvasWheel(event) {
-  if (!_isCanvasRouteActive() || !svg) return;
-  event.preventDefault();
-  const rect = svg.node().getBoundingClientRect();
-  const px = event.clientX - rect.left;
-  const py = event.clientY - rect.top;
-  const absX = Math.abs(event.deltaX);
-  const absY = Math.abs(event.deltaY);
-  const isTrackpadPan = !event.ctrlKey && !event.metaKey
-    && event.deltaMode === 0
-    && (absX > 0 || absY < TRACKPAD_PAN_THRESHOLD);
-  const t = currentTransform ?? d3.zoomIdentity;
-  if (isTrackpadPan) {
-    _applyTransform(d3.zoomIdentity.translate(t.x - event.deltaX, t.y - event.deltaY).scale(t.k));
-    return;
-  }
-  const normalized = event.deltaMode === 1 ? event.deltaY * 16 : event.deltaY;
-  const scaleFactor = Math.exp(-normalized * 0.0018);
-  _applyTransform(_zoomTransformAroundPoint(t, scaleFactor, px, py));
+  return;
 }
 
 function _isCanvasRouteActive() {
   const route = getRoute();
-  return !(route.name === "home" || (route.name === "explore" && !route.params.cluster) || (route.name === "identify" && !route.params.entity));
+  return !(route.name === "home" || route.name === "explore" || (route.name === "identify" && !route.params.entity));
 }
 
 function _isTypingTarget(target) {
@@ -777,12 +873,6 @@ function _isTypingTarget(target) {
 
 function _keyboardCameraAction(event) {
   const { key } = event;
-  if (key === "ArrowLeft"  || key === "a" || key === "A") return "pan-left";
-  if (key === "ArrowRight" || key === "d" || key === "D") return "pan-right";
-  if (key === "ArrowUp"    || key === "w" || key === "W") return "pan-up";
-  if (key === "ArrowDown"  || key === "s" || key === "S") return "pan-down";
-  if (key === "+" || key === "=") return "zoom-in";
-  if (key === "-" || key === "_") return "zoom-out";
   if (key === "0") return "reset";
   if (key === "f" || key === "F") return "fit";
   return null;
@@ -828,7 +918,7 @@ function _tickKeyboardCamera(timestamp) {
 
 function _zoomTransformAroundPoint(transform, scaleFactor, px, py) {
   const s = transform ?? d3.zoomIdentity;
-  const nextScale = Math.max(ZOOM_MIN_SCALE, Math.min(ZOOM_MAX_SCALE, s.k * scaleFactor));
+  const nextScale = Math.max(_minZoomScale, Math.min(ZOOM_MAX_SCALE, s.k * scaleFactor));
   if (!Number.isFinite(nextScale) || nextScale === s.k) return s;
   const wx = (px - s.x) / s.k;
   const wy = (py - s.y) / s.k;
@@ -836,45 +926,52 @@ function _zoomTransformAroundPoint(transform, scaleFactor, px, py) {
 }
 
 function _applyTransform(transform) {
-  if (!svg || !zoom || !transform) return;
-  svg.interrupt();
-  svg.call(zoom.transform, transform);
+  if (!transform) return;
+  const t = _constrainTransform(transform);
+  currentTransform = t;
+  gRoot.style("transform",
+    `translate(${t.x}px,${t.y}px) scale(${t.k})`);
+}
+
+function _constrainTransform(transform) {
+  if (!svg || !gRoot || !_isCanvasRouteActive()) return transform;
+  const scale = Math.max(_minZoomScale, Math.min(ZOOM_MAX_SCALE, transform.k));
+  const viewportW = svg.node().clientWidth || 1;
+  const viewportH = svg.node().clientHeight || 1;
+  let bounds = null;
+  try {
+    const bbox = gRoot.node().getBBox();
+    bounds = bbox.width > 0 && bbox.height > 0 ? bbox : null;
+  } catch {
+    bounds = null;
+  }
+  if (!bounds) return transform;
+
+  const margin = 72;
+  const scaledW = bounds.width * scale;
+  const scaledH = bounds.height * scale;
+  let minX = viewportW - margin - (bounds.x + bounds.width) * scale;
+  let maxX = margin - bounds.x * scale;
+  let minY = viewportH - margin - (bounds.y + bounds.height) * scale;
+  let maxY = margin - bounds.y * scale;
+
+  if (scaledW + margin * 2 <= viewportW) {
+    const centeredX = viewportW / 2 - (bounds.x + bounds.width / 2) * scale;
+    minX = centeredX;
+    maxX = centeredX;
+  }
+  if (scaledH + margin * 2 <= viewportH) {
+    const centeredY = viewportH / 2 - (bounds.y + bounds.height / 2) * scale;
+    minY = centeredY;
+    maxY = centeredY;
+  }
+
+  const x = Math.min(maxX, Math.max(minX, transform.x));
+  const y = Math.min(maxY, Math.max(minY, transform.y));
+  return d3.zoomIdentity.translate(x, y).scale(scale);
 }
 
 // ── Sidebar entity lists ──────────────────────────────────────────────────────
-function _buildCommunityList(clusters) {
-  document.getElementById("entity-list-label").textContent = "Communities";
-  const container = document.getElementById("entity-list");
-  if (!container) return;
-  container.innerHTML = "";
-  clusters.forEach(cluster => {
-    const item = document.createElement("div");
-    item.className = "entity-item community-item";
-    item.dataset.id = cluster.id;
-    item.innerHTML = `<span class="community-dot" style="background:${clusterColor(cluster.id, 0.85)}"></span><span class="entity-id">${cluster.label}</span><span class="entity-meta">${cluster.count} members</span>`;
-    item.addEventListener("click", () => navigate("summarize", { community: cluster.id }));
-    container.appendChild(item);
-  });
-}
-
-function _buildCaseList(store, communityId = null) {
-  const container = document.getElementById("entity-list");
-  if (!container) return;
-  container.innerHTML = "";
-  const community = communityId ? store.communities?.find(c => c.id === communityId) : null;
-  document.getElementById("entity-list-label").textContent = community ? community.label : `${store.caseType ?? "Case"}s`;
-  let list = store.caseList;
-  if (community) { const memberSet = new Set(community.nodeIds); list = list.filter(c => memberSet.has(c.id)); }
-  list.slice(0, 200).forEach(item => {
-    const row = document.createElement("div");
-    row.className = "entity-item";
-    row.dataset.id = item.id;
-    row.innerHTML = `<span class="entity-id">${item.id}</span><span class="entity-meta">${item.itemCount} related - ${item.eventCount} events</span>`;
-    row.addEventListener("click", () => navigate("identify", { entity: item.id }));
-    container.appendChild(row);
-  });
-}
-
 function _buildEntityList(store, query = "") {
   document.getElementById("entity-list-label").textContent = query ? "Entity search" : "Entities";
   const container = document.getElementById("entity-list");
@@ -946,11 +1043,8 @@ function _updateSidebarList(force = false) {
     else _buildEntityList(store, _entitySearchQuery);
     return;
   }
-  if (route.name === "summarize" && !route.params.community) {
-    const graph = getOverviewGraph({ activities: _filters.activities });
-    _buildCommunityList(graph.clusters);
-  } else if (route.name === "summarize" && route.params.community) {
-    _buildCaseList(store, route.params.community);
+  if (route.name === "summarize") {
+    _buildEntityList(store, _entitySearchQuery);
   } else if (isIdentify) {
     _buildGroupedEntityList(store);
     if (route.params.entity) _setActiveEntityInList(route.params.entity);
@@ -977,10 +1071,8 @@ function _updateStatusBar(store) {
   document.getElementById("status-entities").innerHTML = `Entities: <b>${store.entities.length.toLocaleString()}</b>`;
   const route = getRoute();
   let tail = `${store.caseType ?? "Cases"}: <b>${store.caseList.length.toLocaleString()}</b>`;
-  if (route.name === "summarize" && !route.params.community) tail = `Communities: <b>${store.communities?.length?.toLocaleString?.() ?? 0}</b>`;
-  else if (route.name === "summarize" && route.params.community) {
-    const c = store.communities?.find(x => x.id === route.params.community);
-    tail = `${store.caseType ?? "Cases"}: <b>${c?.nodeIds?.length?.toLocaleString?.() ?? 0}</b>`;
+  if (route.name === "summarize") {
+    tail = `Types: <b>${_tekgData?.entityTypes?.length ?? 0}</b>`;
   } else if (route.name === "compare" && _compareMode === "variants") {
     tail = `Variants: <b>${_variantData?.variantCount?.toLocaleString?.() ?? 0}</b>`;
   } else if (route.name === "identify" && route.params.entity) {
@@ -1068,35 +1160,6 @@ function _updateClusterActivityPanel(detailGraph) {
   content.querySelector("#btn-close-cluster-filter")?.addEventListener("click", () => _dismissClusterActivityContext());
 }
 
-function _updateOverviewPanels(overviewGraph) {
-  const title = document.getElementById("overview-summary-title");
-  const content = document.getElementById("overview-summary-content");
-  if (!title || !content) return;
-  if (!overviewGraph) { title.textContent = "Overview Summary"; content.innerHTML = `<div class="stat-row"><span class="stat-label">Open overview or a community to see summary statistics.</span></div>`; return; }
-  const route = getRoute();
-  if (route.name === "summarize" && route.params.community) {
-    const community = overviewGraph.clusters?.[0];
-    title.textContent = community?.label ?? "Community Summary";
-    content.innerHTML = _rowsToHtml([
-      { label: "Members",      value: overviewGraph.meta.caseCount },
-      { label: "Events shown", value: overviewGraph.meta.filteredEvents },
-      { label: "Books shown",  value: overviewGraph.meta.shownItems },
-      { label: "Case links",   value: overviewGraph.meta.overviewEdgeCount },
-      { label: "Resources",    value: community?.resources?.length ?? 0 },
-      { label: "Attributes",   value: community?.attributes?.length ?? 0 },
-    ]);
-    return;
-  }
-  title.textContent = "Overview Summary";
-  content.innerHTML = _rowsToHtml([
-    { label: "Communities",      value: overviewGraph.meta.clusterCount },
-    { label: "Cases shown",      value: overviewGraph.meta.caseCount },
-    { label: "Events shown",     value: overviewGraph.meta.filteredEvents },
-    { label: "Books shown",      value: overviewGraph.meta.shownItems },
-    { label: "Case links",       value: overviewGraph.meta.overviewEdgeCount },
-    { label: "Community links",  value: overviewGraph.meta.overviewCommunityEdgeCount },
-  ]);
-}
 
 function _updateVariantPanels(variantData, selectedVariant) {
   const summaryTitle   = document.getElementById("variant-summary-title");
@@ -1109,18 +1172,21 @@ function _updateVariantPanels(variantData, selectedVariant) {
   if (!variantData) {
     summaryTitle.textContent = "Variant Summary";
     summaryContent.innerHTML = `<div class="stat-row"><span class="stat-label">Open the variants view to inspect process variants.</span></div>`;
-    itemLabel.textContent = "Books in variant"; memberLabel.textContent = "Members in variant";
-    itemList.innerHTML = `<div class="empty-note">Select a variant to list its books.</div>`;
-    memberList.innerHTML = `<div class="empty-note">Select a variant to list its members.</div>`;
+    itemLabel.textContent = "Primary entities";
+    memberLabel.textContent = "Parent entities";
+    itemList.innerHTML = `<div class="empty-note">Select a variant to list its lowest-level entities.</div>`;
+    memberList.innerHTML = `<div class="empty-note">Select a variant to list its parent entities.</div>`;
     return;
   }
-  itemLabel.textContent   = `${variantData.itemType ?? "Items"} in variant`;
-  memberLabel.textContent = `${variantData.caseType ?? "Cases"} in variant`;
+  const itemType = variantData.itemType ?? "Items";
+  const caseType = variantData.caseType ?? "Cases";
+  itemLabel.textContent   = `${itemType} in variant`;
+  memberLabel.textContent = `${caseType} in variant`;
   if (!selectedVariant) {
     summaryTitle.textContent = "Variant Overview";
     summaryContent.innerHTML = _rowsToHtml([
       { label: "Variants",      value: variantData.variantCount },
-      { label: "Shown rows",    value: variantData.variants.length },
+      { label: "Shown rows",    value: `${variantData.variants.length} (top 20%)` },
       { label: "Instances",     value: variantData.totalInstances },
       { label: "Top share",     value: formatPercent(variantData.summary?.dominantVariantShare ?? 0) },
       { label: "Avg variant size", value: (variantData.summary?.averageVariantSize ?? 0).toFixed(1) },
@@ -1128,37 +1194,70 @@ function _updateVariantPanels(variantData, selectedVariant) {
       { divider: true },
       { label: "Selection", value: "Click a variant row to inspect it", className: "flow" },
     ]);
-    itemList.innerHTML   = `<div class="empty-note">Select a variant to list its ${variantData.itemType?.toLowerCase?.() ?? "items"}.</div>`;
-    memberList.innerHTML = `<div class="empty-note">Select a variant to list its ${variantData.caseType?.toLowerCase?.() ?? "cases"}.</div>`;
+    itemLabel.textContent = `${itemType} in selected variant`;
+    memberLabel.textContent = `${caseType} in selected variant`;
+    itemList.innerHTML   = `<div class="empty-note">Select a variant to list its primary ${itemType.toLowerCase()} entities.</div>`;
+    memberList.innerHTML = `<div class="empty-note">Select a variant to list its linked ${caseType.toLowerCase()} entities.</div>`;
     return;
   }
   summaryTitle.textContent = `Variant ${selectedVariant.rank}`;
-  summaryContent.innerHTML = _rowsToHtml([
-    { label: "Dominant",       value: selectedVariant.isdominant ? "Yes" : "No" },
-    { label: "Share",          value: formatPercent(selectedVariant.frequency) },
-    { label: "Instances",      value: selectedVariant.count },
-    { label: variantData.caseType ?? "Cases", value: selectedVariant.memberCount },
-    { label: variantData.itemType ?? "Items", value: selectedVariant.itemCount },
-    { label: "Events",         value: selectedVariant.eventTotal },
-    { label: "Avg events/item",value: selectedVariant.eventAverage.toFixed(1) },
-    { label: "Avg duration",   value: _formatHoursLabel(selectedVariant.avgDurationHours) },
-    { label: "Resources",      value: selectedVariant.resourceCount },
-    { divider: true },
-    { label: "Sequence",        value: _formatSequencePreview(selectedVariant.sequence), className: "flow" },
-    { label: "Top resources",   value: _formatCountList(selectedVariant.topResources, "label"), className: "flow" },
-    { label: "Top activities",  value: _formatCountList(selectedVariant.topActivities, "activity"), className: "flow" },
-    { label: "Time range",      value: _formatDateRange(selectedVariant.firstDate, selectedVariant.lastDate), className: "flow" },
-  ]);
-  // "Compare top 3" button
-  const topItems = (selectedVariant.items ?? []).slice(0, 3).map(x => x.id);
-  if (topItems.length > 1) {
-    summaryContent.innerHTML += `<div style="margin-top:10px"><button type="button" class="btn btn-sm" id="btn-compare-top3">Compare top ${topItems.length}</button></div>`;
+  summaryContent.innerHTML = _variantSummaryHtml(selectedVariant, itemType, caseType);
+
+  const topMembers = (selectedVariant.members ?? []).slice(0, 3).map(x => x.id);
+  if (topMembers.length > 1) {
+    summaryContent.insertAdjacentHTML("beforeend", `<div class="variant-summary-actions"><button type="button" class="btn btn-sm" id="btn-compare-top3">Compare top ${topMembers.length} ${_escHtml(caseType.toLowerCase())}</button></div>`);
     summaryContent.querySelector("#btn-compare-top3")?.addEventListener("click", () => {
-      navigate("compare", { entities: topItems.join(",") });
+      navigate("compare", { entities: topMembers.join(",") });
     });
   }
+  itemLabel.textContent = `${itemType} in variant (primary)`;
+  memberLabel.textContent = `${caseType} linked to variant`;
   _renderVariantEntityList(itemList, selectedVariant.items, item => `${item.eventCount} events`, "id");
-  _renderVariantEntityList(memberList, selectedVariant.members, member => `${member.itemCount} items – ${member.eventCount} events`, "id");
+  _renderVariantEntityList(memberList, selectedVariant.members, member => `${member.itemCount} ${itemType.toLowerCase()} - ${member.eventCount} events`, "id");
+}
+
+function _variantSummaryHtml(variant, itemType, caseType) {
+  const sequence = _formatSequencePreview(variant.sequence);
+  const resources = _formatCountList(variant.topResources, "label");
+  const activities = _formatCountList(variant.topActivities, "activity");
+  const range = _formatDateRange(variant.firstDate, variant.lastDate);
+  return `
+    <div class="variant-summary-hero">
+      <div class="variant-summary-rank">Variant ${_escHtml(variant.rank)}</div>
+      <div class="variant-summary-share">${_escHtml(formatPercent(variant.frequency))}</div>
+      <div class="variant-summary-sub">${_escHtml(variant.count)} instances - ${_escHtml(variant.itemCount)} ${_escHtml(itemType.toLowerCase())} - ${_escHtml(variant.memberCount)} ${_escHtml(caseType.toLowerCase())}</div>
+      ${variant.isdominant ? `<div class="variant-summary-badge">Dominant variant</div>` : ""}
+    </div>
+    <div class="variant-summary-metrics">
+      ${_variantMetricHtml("Events", variant.eventTotal)}
+      ${_variantMetricHtml("Avg events/item", variant.eventAverage.toFixed(1))}
+      ${_variantMetricHtml("Avg duration", _formatHoursLabel(variant.avgDurationHours))}
+      ${_variantMetricHtml("Resources", variant.resourceCount)}
+    </div>
+    <div class="variant-summary-section">
+      <b>Sequence</b>
+      <span>${_escHtml(sequence)}</span>
+    </div>
+    <div class="variant-summary-section">
+      <b>Top activities</b>
+      <span>${_escHtml(activities)}</span>
+    </div>
+    <div class="variant-summary-section">
+      <b>Top resources</b>
+      <span>${_escHtml(resources)}</span>
+    </div>
+    <div class="variant-summary-section">
+      <b>Time range</b>
+      <span>${_escHtml(range)}</span>
+    </div>
+    <div class="variant-summary-note">
+      Primary entities below are ${_escHtml(itemType)} because variants are built from their lifecycles. Linked ${_escHtml(caseType)} stay available as context.
+    </div>
+  `;
+}
+
+function _variantMetricHtml(label, value) {
+  return `<div class="variant-summary-metric"><span>${_escHtml(label)}</span><b>${_escHtml(value)}</b></div>`;
 }
 
 function _renderVariantEntityList(container, items, metaBuilder, idKey) {
@@ -1187,6 +1286,131 @@ function _renderLegend() {
     <div class="legend-item"><span class="legend-swatch legend-corr"></span><span>Correlation link</span></div>
     <div class="legend-item"><span class="legend-swatch legend-relation"></span><span>Entity relation</span></div>
   `;
+}
+
+// ── Shared-cluster isolation ────────────────────────────────────────────────
+function _openClusterIsolation(cluster) {
+  const eventIds = (cluster.ids ?? cluster.eventIds ?? []).map(id => String(id));
+  if (!eventIds.length) return;
+  _clusterActivityContext = null;
+  _selection = null;
+  _isolatedClusterContext = {
+    clusterId: String(cluster.clusterId ?? cluster.id ?? "shared-cluster"),
+    eventIds,
+    sharedEntityIds: (cluster.sharedEntityIds ?? []).map(id => String(id)),
+    activityCounts: [...(cluster.activityCounts ?? [])].map(x => ({
+      activity: x.activity,
+      color: x.color,
+      count: x.count ?? 0,
+    })),
+  };
+  handleRoute(getRoute());
+}
+
+function _closeClusterIsolation() {
+  if (!_isolatedClusterContext) return;
+  _isolatedClusterContext = null;
+  handleRoute(getRoute());
+}
+
+function _resolveDetailRenderGraph(detailGraph) {
+  if (!detailGraph || !_isolatedClusterContext) return detailGraph;
+  const eventIds = new Set(_isolatedClusterContext.eventIds ?? []);
+  const present = detailGraph.eventAnchors?.some(anchor => eventIds.has(String(anchor.event_id)));
+  if (!present) {
+    _isolatedClusterContext = null;
+    return detailGraph;
+  }
+  return _buildIsolatedClusterGraph(detailGraph, eventIds);
+}
+
+function _buildIsolatedClusterGraph(detailGraph, eventIds) {
+  const eventAnchors = (detailGraph.eventAnchors ?? [])
+    .filter(anchor => eventIds.has(String(anchor.event_id)))
+    .map(anchor => ({ ...anchor }));
+  const visibleEventIds = new Set(eventAnchors.map(anchor => String(anchor.event_id)));
+  const visibleEntityIds = new Set(eventAnchors.flatMap(anchor =>
+    (anchor.memberships ?? []).map(membership => membership.entity_id)
+  ));
+  const bands = (detailGraph.bands ?? []).map(band => {
+    const lanes = (band.lanes ?? []).map(lane => {
+      if (!visibleEntityIds.has(lane.entity_id)) return null;
+      const events = (lane.events ?? []).filter(event => visibleEventIds.has(String(event.event_id)));
+      const memberships = (lane.memberships ?? []).filter(membership => visibleEventIds.has(String(membership.event_id)));
+      if (!events.length && !memberships.length) return null;
+      return {
+        ...lane,
+        events,
+        eventIds: events.map(event => event.event_id),
+        memberships,
+        dfEdges: (lane.dfEdges ?? []).filter(edge =>
+          visibleEventIds.has(String(edge.source_event_id)) && visibleEventIds.has(String(edge.target_event_id))
+        ),
+        eventCount: events.length,
+        sequence: events.map(event => event.activity).filter(Boolean),
+      };
+    }).filter(Boolean);
+    return lanes.length ? { ...band, lanes } : null;
+  }).filter(Boolean);
+  const relations = (detailGraph.relations ?? []).filter(relation =>
+    visibleEntityIds.has(relation.source_entity_id) && visibleEntityIds.has(relation.target_entity_id)
+  );
+  const summary = {
+    ...(detailGraph.summary ?? {}),
+    visibleEntityTypeCount: bands.length,
+    visibleEntityCount: visibleEntityIds.size,
+    eventCount: eventAnchors.length,
+    relationCount: relations.length,
+    sharedEventCount: eventAnchors.filter(anchor => anchor.sharedEntityIds.length > 1).length,
+    sharedEventHotspots: eventAnchors.map(anchor => ({
+      event_id: anchor.event_id,
+      activity: anchor.activity,
+      entityCount: anchor.sharedEntityIds?.length ?? 0,
+      entityTypes: anchor.sharedEntityTypes ?? [],
+    })),
+    parallelEntityTypes: bands.map(band => ({ entityType: band.entityType, count: band.lanes.length })),
+  };
+  return {
+    ...detailGraph,
+    eventAnchors,
+    bands,
+    relations,
+    sharedEvents: eventAnchors.filter(anchor => anchor.sharedEntityIds.length > 1),
+    crossTypeLinks: [],
+    visibleEntityIds: [...visibleEntityIds],
+    visibleEntityTypes: bands.map(band => band.entityType),
+    summary,
+    isClusterIsolation: true,
+    isolatedCluster: _isolatedClusterContext,
+  };
+}
+
+function _updateClusterIsolationControl(detailGraph) {
+  const wrap = document.getElementById("canvas-wrap");
+  if (!wrap) return;
+  let panel = document.getElementById("cluster-isolation-panel");
+  if (!detailGraph?.isClusterIsolation || !_isolatedClusterContext) {
+    panel?.remove();
+    return;
+  }
+  if (!panel) {
+    panel = document.createElement("div");
+    panel.id = "cluster-isolation-panel";
+    panel.className = "cluster-isolation-panel";
+    wrap.appendChild(panel);
+  }
+  const activities = (_isolatedClusterContext.activityCounts ?? [])
+    .slice(0, 3)
+    .map(item => `${_escHtml(item.activity)} (${item.count})`)
+    .join(", ");
+  panel.innerHTML = `
+    <div class="cluster-isolation-copy">
+      <b>Shared-event isolated view</b>
+      <span>${(_isolatedClusterContext.eventIds ?? []).length} events${activities ? ` - ${activities}` : ""}</span>
+    </div>
+    <button type="button" class="topbar-btn" id="btn-close-cluster-isolation">Back to complete trace</button>
+  `;
+  panel.querySelector("#btn-close-cluster-isolation")?.addEventListener("click", _closeClusterIsolation);
 }
 
 // ── Cluster activity context ──────────────────────────────────────────────────
@@ -1244,6 +1468,9 @@ function _dismissClusterActivityContext() {
 function _applyVisibility() {
   if (!gRoot) return;
   gRoot.selectAll(".df-link").attr("display", vis.df ? null : "none").attr("opacity", opa.df);
+  gRoot.selectAll(".df-link-bottleneck-halo")
+    .attr("display", vis.df && vis.bottleneck ? null : "none")
+    .attr("opacity", vis.bottleneck ? opa.df : opa.df * 0.2);
   gRoot.selectAll(".corr-link").attr("display", vis.corr ? null : "none").attr("opacity", opa.corr);
   gRoot.selectAll(".relation-link").attr("display", vis.relations ? null : "none").attr("opacity", opa.relations);
   gRoot.selectAll(".shared-guide").attr("display", vis.sync ? null : "none").attr("opacity", vis.sync ? 1 : 0.12);
@@ -1252,21 +1479,28 @@ function _applyVisibility() {
 
 function _toggleSelection(sel) {
   _selection = (_selection && JSON.stringify(_selection) === JSON.stringify(sel)) ? null : sel;
-  _applySelectionState();
+  _applySelectionStateDeferred();
 }
 
-function _clearSelection() { _selection = null; _applySelectionState(); }
+function _clearSelection() { _selection = null; _applySelectionStateDeferred(); }
+
+function _applySelectionStateDeferred() {
+  if (_selectionRaf) cancelAnimationFrame(_selectionRaf);
+  _selectionRaf = requestAnimationFrame(() => { _selectionRaf = null; _applySelectionState(); });
+}
 
 function _applySelectionState() {
   if (!gRoot) return;
   const anchors  = gRoot.selectAll(".event-anchor-core, .event-cluster-core");
   const markers  = gRoot.selectAll(".lane-marker-circle");
   const dfEdges  = gRoot.selectAll(".df-link");
+  const dfHalos  = gRoot.selectAll(".df-link-bottleneck-halo");
   const lanes    = gRoot.selectAll(".entity-lane");
   const corrLinks = gRoot.selectAll(".corr-link");
   anchors.classed("highlighted", false).classed("dimmed", false);
   markers.classed("highlighted", false).classed("dimmed", false);
   dfEdges.classed("edge-highlighted", false).classed("edge-dimmed", false);
+  dfHalos.classed("edge-highlighted", false).classed("edge-dimmed", false);
   lanes.classed("item-highlighted", false).classed("item-dimmed", false);
   corrLinks.classed("edge-highlighted", false).classed("edge-dimmed", false);
   if (!_selection) return;
@@ -1289,6 +1523,8 @@ function _applySelectionState() {
            .classed("dimmed",      function() { return !activeEvts.has(d3.select(this.parentNode).attr("data-event-id")); });
     dfEdges.classed("edge-highlighted", function() { return d3.select(this).attr("data-edge-id") === _selection.edgeId; })
            .classed("edge-dimmed",      function() { return d3.select(this).attr("data-edge-id") !== _selection.edgeId; });
+    dfHalos.classed("edge-highlighted", function() { return d3.select(this).attr("data-edge-id") === _selection.edgeId; })
+           .classed("edge-dimmed",      function() { return d3.select(this).attr("data-edge-id") !== _selection.edgeId; });
     lanes.classed("item-highlighted", function() { return d3.select(this).attr("data-entity-id") === _selection.entityId; })
          .classed("item-dimmed",      function() { return d3.select(this).attr("data-entity-id") !== _selection.entityId; });
   }
@@ -1303,23 +1539,68 @@ function _datumIntersectsEvents(datum, eventIds) {
 // ── Camera ────────────────────────────────────────────────────────────────────
 function _fitToView(totalHeight, options = {}) {
   if (!svg) return;
-  const transform = computeFitTransform(svg, gRoot, totalHeight, options);
-  if (!transform) return;
-  svg.transition().duration(CAMERA_EASE_MS).ease(d3.easeCubicOut).call(zoom.transform, transform);
+  _setDocumentCanvas(totalHeight, { scrollTop: options.scrollTop ?? true });
 }
 
 function _fitCurrentView() {
+  if (!_isCanvasRouteActive()) {
+    document.getElementById("screen-host")?.scrollTo({ top: 0, behavior: "auto" });
+    return;
+  }
   const route = getRoute();
-  if (route.name === "identify" || (route.name === "compare" && _compareMode === "compare") || (route.name === "explore" && route.params.cluster)) _fitDetailView();
+  if (route.name === "identify" || (route.name === "compare" && _compareMode === "compare")) _fitDetailView();
+  else if (route.name === "compare" && _compareMode === "variants") _fitVariantView();
   else _fitToView(_lastTotalHeight);
 }
 
+function _fitVariantView() {
+  _fitToView(_lastTotalHeight, { alignTop: true, alignLeft: true, minScale: 0.32, padX: 28, padY: 24, preferWidth: true, lockZoomFloor: true });
+}
+
 function _fitDetailView() {
-  _fitToView(_lastTotalHeight, { alignTop: true, alignLeft: true, minScale: 0.34, padX: 28, padY: 26, preferWidth: true });
+  _fitToView(_lastTotalHeight, { alignTop: true, alignLeft: true, minScale: 0.34, padX: 28, padY: 26, preferWidth: true, lockZoomFloor: true });
 }
 
 function _resetZoom() {
-  svg?.transition().duration(CAMERA_EASE_MS).ease(d3.easeCubicOut).call(zoom.transform, d3.zoomIdentity);
+  if (!svg) return;
+  _fitCurrentView();
+}
+
+function _setZoomFloor(scale) {
+  _minZoomScale = Number.isFinite(scale) ? Math.max(ZOOM_MIN_SCALE, scale) : ZOOM_MIN_SCALE;
+}
+
+function _setDocumentCanvas(totalHeight, options = {}) {
+  const svgNode = svg?.node?.();
+  const wrap = document.getElementById("canvas-wrap");
+  if (!svgNode || !wrap) return;
+
+  let bounds = null;
+  try {
+    const bbox = gRoot.node().getBBox();
+    bounds = bbox.width > 0 && bbox.height > 0 ? bbox : null;
+  } catch {
+    bounds = null;
+  }
+
+  const viewportW = Math.max(wrap.clientWidth || svgNode.clientWidth || 900, 1);
+  const viewportH = Math.max(wrap.clientHeight || svgNode.clientHeight || 600, 1);
+  const contentW = bounds ? Math.ceil(bounds.x + bounds.width + 48) : viewportW;
+  const contentH = bounds ? Math.ceil(bounds.y + bounds.height + 48) : (totalHeight ?? viewportH);
+  const width = Math.max(viewportW, contentW);
+  const height = Math.max(viewportH, Math.ceil(totalHeight ?? 0), contentH);
+
+  svg
+    .attr("width", width)
+    .attr("height", height)
+    .style("width", `${width}px`)
+    .style("height", `${height}px`);
+  currentTransform = d3.zoomIdentity;
+  gRoot.style("transform", "translate(0px,0px) scale(1)");
+
+  if (options.scrollTop) {
+    wrap.scrollTo({ left: 0, top: 0, behavior: "auto" });
+  }
 }
 
 // ── Sidebar resize ────────────────────────────────────────────────────────────
@@ -1374,7 +1655,7 @@ function _detailScopeLabel(scope) {
 
 function _formatSequencePreview(seq = []) {
   if (!seq.length) return "none";
-  const p = seq.slice(0, 5).join(" → ");
+  const p = seq.slice(0, 5).join(" -> ");
   return seq.length > 5 ? `${p} (+${seq.length - 5} more)` : p;
 }
 
@@ -1391,7 +1672,7 @@ function _formatHoursLabel(hours) {
 
 function _formatDateRange(first, last) {
   if (!(first instanceof Date) || isNaN(first.getTime()) || !(last instanceof Date) || isNaN(last.getTime())) return "n/a";
-  return `${first.toLocaleDateString("en-GB")} → ${last.toLocaleDateString("en-GB")}`;
+  return `${first.toLocaleDateString("en-GB")} -> ${last.toLocaleDateString("en-GB")}`;
 }
 
 function _formatParallelBandPreview(bands = []) {
