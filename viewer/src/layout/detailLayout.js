@@ -16,7 +16,7 @@ export const RELATION_PORT_X = TIMELINE_X0 - 26;
 const EVENT_STACK_GAP = 18;
 const EVENT_STACK_BASE_OFFSET = 12;
 const EVENT_STACK_CLEARANCE = 15;
-const SHARED_CLUSTER_GAP = 18;
+const SHARED_CLUSTER_GAP = 0;
 const SHARED_CLUSTER_ROW_GAP = 30;
 const SHARED_CLUSTER_BASE_OFFSET = 16;
 const SHARED_CLUSTER_H = 22;
@@ -43,10 +43,7 @@ export function computeDetailLayout(graph, width) {
   const stackDepth = Math.max(...stackRows, -1) + 1;
   const clusterSeeds = _buildSharedEventClusters(seeds.filter(anchor => anchor.isSharedEvent));
   const clusterDepth = Math.max(...clusterSeeds.map(cluster => cluster.laneIndex), -1) + 1;
-  const railDepth = Math.max(
-    Math.max(stackDepth, 1) * EVENT_STACK_GAP,
-    clusterSeeds.length ? Math.max(clusterDepth, 1) * SHARED_CLUSTER_LANE_GAP + 14 : 0
-  );
+  const railDepth = Math.max(stackDepth, 1) * EVENT_STACK_GAP;
   const axisY = DETAIL_PAD_TOP + HEADER_RESERVED_H + railDepth + 18;
   const sharedEventClusters = clusterSeeds.map(cluster => ({
     ...cluster,
@@ -127,8 +124,9 @@ export function computeDetailLayout(graph, width) {
   const lanePositionById = {};
   laidBands.forEach(band => band.lanes.forEach(lane => { lanePositionById[lane.entity_id] = lane; }));
 
-  const corrLinks = laidAnchors.flatMap(anchor =>
-    (anchor.memberships ?? [])
+  const corrLinks = laidAnchors.flatMap(anchor => {
+    if (anchor.isSharedEvent) return [];
+    return (anchor.memberships ?? [])
       .map(membership => lanePositionById[membership.entity_id])
       .filter(Boolean)
       .map(lane => ({
@@ -137,11 +135,11 @@ export function computeDetailLayout(graph, width) {
         entity_id: lane.entity_id,
         entity_type: lane.entityType,
         x1: anchor.x,
-        y1: anchor.isSharedEvent ? anchor.y + SHARED_CLUSTER_H / 2 + 2 : anchor.y + anchor.r + 2,
+        y1: anchor.y + anchor.r + 2,
         x2: anchor.x,
         y2: lane.y - LANE_MARKER_R - 2,
-      }))
-  );
+      }));
+  });
 
   const sharedGuides = laidAnchors
     .filter(anchor => anchor.isSharedEvent)
@@ -152,10 +150,13 @@ export function computeDetailLayout(graph, width) {
       if (!membershipYs.length) return null;
       return {
         event_id: anchor.event_id,
+        activity: anchor.activity ?? "",
         x: anchor.x,
-        y1: Math.min(anchor.isSharedEvent ? anchor.y + SHARED_CLUSTER_H / 2 : anchor.y, ...membershipYs),
-        y2: Math.max(anchor.y, ...membershipYs),
+        y1: axisY,
+        y2: Math.max(...membershipYs) + LANE_MARKER_R + 3,
         entityCount: anchor.sharedEntityIds.length,
+        sharedEntityIds: anchor.sharedEntityIds,
+        activityColor: anchor.activityColor ?? "#64748b",
       };
     })
     .filter(Boolean);

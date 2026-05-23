@@ -32,28 +32,6 @@ export function drawDetailView(layout, lBg, lMeta, lDfPo, lCorr, lRes, lDfItem, 
 
   _drawAxis(layout.axis, layout.totalHeight, lBg, lLabels);
 
-  lBg.selectAll(null).data(layout.sharedClusterLanes ?? []).join("rect")
-    .attr("class", "shared-cluster-lane")
-    .attr("x", d => d.x)
-    .attr("y", d => d.y - d.height / 2)
-    .attr("width", d => d.width)
-    .attr("height", d => d.height)
-    .attr("rx", 8)
-    .attr("fill", (_, i) => i % 2 === 0 ? "rgba(219,234,254,0.30)" : "rgba(248,250,252,0.68)")
-    .attr("stroke", "rgba(37,99,235,0.12)")
-    .attr("stroke-width", 1)
-    .attr("pointer-events", "none");
-
-  lLabels.selectAll(null).data(layout.sharedClusterLanes ?? []).join("text")
-    .attr("class", "shared-cluster-lane-label")
-    .attr("x", DETAIL_PAD_X)
-    .attr("y", d => d.y + 3)
-    .attr("font-family", "JetBrains Mono, monospace")
-    .attr("font-size", "9px")
-    .attr("font-weight", "700")
-    .attr("fill", "rgba(30,64,175,0.72)")
-    .text(d => ellipsis(`${d.label} (${d.eventCount})`, 31));
-
   lMeta.selectAll(null).data(layout.anchorRail.filter(anchor => anchor.y < layout.axis.y - 6)).join("line")
     .attr("class", "event-stem")
     .attr("x1", d => d.x).attr("y1", d => d.y + d.r + 2)
@@ -61,21 +39,45 @@ export function drawDetailView(layout, lBg, lMeta, lDfPo, lCorr, lRes, lDfItem, 
     .attr("stroke", "rgba(148,163,184,0.32)")
     .attr("stroke-width", 1.1);
 
-  lMeta.selectAll(null).data(layout.sharedEventClusters).join("line")
-    .attr("class", "event-stem event-stem-cluster")
-    .attr("x1", d => d.x).attr("y1", d => d.y + d.height / 2 + 2)
-    .attr("x2", d => d.x).attr("y2", layout.axis.y - 4)
-    .attr("stroke", "rgba(37,99,235,0.18)")
-    .attr("stroke-width", 1)
-    .attr("stroke-dasharray", "3 6");
-
+  // Event spines: one vertical colored line per shared event, axis → lowest correlated lane
   lMeta.selectAll(null).data(layout.sharedGuides).join("line")
-    .attr("class", "shared-guide")
-    .attr("x1", d => d.x).attr("y1", d => d.y1).attr("x2", d => d.x).attr("y2", d => d.y2)
-    .attr("stroke", "rgba(37,99,235,0.24)")
-    .attr("stroke-width", d => Math.min(1.7 + d.entityCount * 0.45, 4.4))
-    .attr("stroke-dasharray", "5 4")
-    .attr("stroke-linecap", "round");
+    .attr("class", "event-spine")
+    .attr("x1", d => d.x).attr("y1", d => d.y1)
+    .attr("x2", d => d.x).attr("y2", d => d.y2)
+    .attr("stroke", d => d.activityColor)
+    .attr("stroke-width", d => Math.min(0.9 + d.entityCount * 0.2, 2.6))
+    .attr("stroke-opacity", 0.30)
+    .attr("stroke-linecap", "round")
+    .style("cursor", "pointer")
+    .on("mousemove", (ev, d) => cb.onTooltipShow(
+      `<div class="tip-title">${d.activity}</div>
+       <div class="tip-row">Shared event — correlated to <b>×${d.entityCount}</b> entities</div>
+       <div class="tip-row" style="margin-top:4px;color:var(--accent);font-size:10px">One event, multiple corr edges</div>`,
+      ev
+    ))
+    .on("mouseleave", cb.onTooltipHide);
+
+  // Small event-node dot on the axis for each spine — clickable to select the shared event
+  lMeta.selectAll(null).data(layout.sharedGuides).join("circle")
+    .attr("class", "event-spine-node")
+    .attr("cx", d => d.x).attr("cy", d => d.y1)
+    .attr("r", 4.5)
+    .attr("fill", d => d.activityColor)
+    .attr("fill-opacity", 0.72)
+    .attr("stroke", "rgba(255,255,255,0.88)")
+    .attr("stroke-width", 1.2)
+    .style("cursor", "pointer")
+    .on("click", (ev, d) => {
+      ev.stopPropagation();
+      cb.onEventSelect?.({ id: d.event_id, sharedEntityIds: d.sharedEntityIds });
+    })
+    .on("mousemove", (ev, d) => cb.onTooltipShow(
+      `<div class="tip-title">${d.activity}</div>
+       <div class="tip-row">Shared event — correlated to <b>×${d.entityCount}</b> entities</div>
+       <div class="tip-row" style="margin-top:4px;color:var(--accent);font-size:10px">Click to highlight all correlated lanes</div>`,
+      ev
+    ))
+    .on("mouseleave", cb.onTooltipHide);
 
   lMeta.selectAll(null).data(layout.relationLinks).join("path")
     .attr("class", "relation-link")
@@ -92,17 +94,6 @@ export function drawDetailView(layout, lBg, lMeta, lDfPo, lCorr, lRes, lDfItem, 
     .on("mouseleave", cb.onTooltipHide);
 
   layout.bands.forEach((band, bandIndex) => _drawBand(band, bandIndex, lBg, lMeta, lDfItem, lNodes, lLabels, cb));
-
-  lMeta.selectAll(null).data(layout.sharedEventClusters).join("rect")
-    .attr("class", "shared-cluster-band")
-    .attr("x", d => d.bandX).attr("y", d => d.bandY1)
-    .attr("width", d => d.bandWidth).attr("height", d => Math.max(24, d.bandY2 - d.bandY1))
-    .attr("rx", 9)
-    .attr("fill", "rgba(37,99,235,0.045)")
-    .attr("stroke", "rgba(37,99,235,0.16)")
-    .attr("stroke-width", 1)
-    .attr("stroke-dasharray", "2 6")
-    .attr("pointer-events", "none");
 
   lCorr.selectAll(null).data(layout.corrLinks).join("line")
     .attr("class", "corr-link")
@@ -143,81 +134,6 @@ export function drawDetailView(layout, lBg, lMeta, lDfPo, lCorr, lRes, lDfItem, 
     .attr("class", "event-anchor-core");
 
   _drawLifecycleGlyphs(layout.anchorRail, lNodes);
-
-  const clusterNodes = lNodes.selectAll(null).data(layout.sharedEventClusters).join("g")
-    .attr("class", "event-cluster")
-    .attr("data-event-ids", d => d.eventIds.join("|"))
-    .attr("transform", d => `translate(${d.x},${d.y})`)
-    .style("cursor", "pointer")
-    .on("click", (ev, d) => {
-      ev.stopPropagation();
-      cb.onEventSelect?.(d.eventIds.length > 1
-        ? {
-          kind: "event-cluster",
-          clusterId: d.id,
-          ids: d.eventIds,
-          sharedEntityIds: d.sharedEntityIds,
-          activityCounts: d.activityCounts,
-        }
-        : {
-          id: d.representativeEventId,
-          sharedEntityIds: d.sharedEntityIds,
-        });
-    })
-    .on("mousemove", (ev, d) => cb.onTooltipShow(_sharedClusterTooltip(d), ev))
-    .on("mouseleave", cb.onTooltipHide);
-
-  clusterNodes.append("rect")
-    .attr("x", d => -d.width / 2)
-    .attr("y", d => -d.height / 2)
-    .attr("width", d => d.width)
-    .attr("height", d => d.height)
-    .attr("rx", d => Math.min(d.height / 2, 10))
-    .attr("fill", "rgba(255,255,255,0.98)")
-    .attr("stroke", "rgba(37,99,235,0.46)")
-    .attr("stroke-width", 1.4)
-    .attr("class", "event-cluster-shell");
-
-  clusterNodes.append("rect")
-    .attr("x", d => -d.width / 2 + 3)
-    .attr("y", d => -d.height / 2 + 3)
-    .attr("width", d => Math.max(d.width - 6, 18))
-    .attr("height", d => Math.max(d.height - 6, 14))
-    .attr("rx", d => Math.min((d.height - 6) / 2, 8))
-    .attr("fill", "rgba(219,234,254,0.96)")
-    .attr("stroke", "rgba(37,99,235,0.58)")
-    .attr("stroke-width", 1.15)
-    .attr("class", "event-cluster-core");
-
-  clusterNodes.each(function(d) {
-    const swatchStartX = -d.width / 2 + 10;
-    const swatchGap = 8;
-    const g = d3.select(this);
-    g.selectAll(".event-cluster-swatch")
-      .data(d.activityPalette.map((color, index) => ({
-        color,
-        x: swatchStartX + index * swatchGap,
-      })))
-      .join("circle")
-      .attr("class", "event-cluster-swatch")
-      .attr("cx", item => item.x)
-      .attr("cy", 0)
-      .attr("r", 2.9)
-      .attr("fill", item => item.color)
-      .attr("stroke", "rgba(255,255,255,0.9)")
-      .attr("stroke-width", 0.8);
-  });
-
-  clusterNodes.append("text")
-    .attr("x", d => d.width / 2 - 11)
-    .attr("y", 0)
-    .attr("text-anchor", "end")
-    .attr("dy", "0.34em")
-    .attr("font-family", "JetBrains Mono, monospace")
-    .attr("font-size", "9px")
-    .attr("font-weight", "700")
-    .attr("fill", "#0f172a")
-    .text(d => d.eventCount);
 
   lLabels.append("text")
     .attr("x", DETAIL_PAD_X).attr("y", 40)
@@ -428,23 +344,6 @@ function _eventTooltip(anchor) {
     .map(membership => `<div class="tip-row">${membership.entity_type}: <b>${membership.entity_label}</b></div>`)
     .join("");
   return `<div class="tip-title">${anchor.activity}</div><div class="tip-row">Event: <b>${anchor.event_id}</b></div><div class="tip-row">Time: <b>${timestamp}</b></div><div class="tip-row">Shared: <b>${anchor.sharedEntityIds.length > 1 ? `Yes (${anchor.sharedEntityIds.length})` : "No"}</b></div>${resourceRows}<div class="tip-divider"></div>${membershipRows}`;
-}
-
-function _sharedClusterTooltip(cluster) {
-  const firstTime = Number.isFinite(cluster.minTime) ? new Date(cluster.minTime) : null;
-  const lastTime = Number.isFinite(cluster.maxTime) ? new Date(cluster.maxTime) : null;
-  const timeLabel = firstTime && lastTime
-    ? (cluster.minTime === cluster.maxTime
-      ? firstTime.toLocaleString("en-GB")
-      : `${firstTime.toLocaleDateString("en-GB")} - ${lastTime.toLocaleDateString("en-GB")}`)
-    : "n/a";
-  const topActivities = cluster.activityCounts
-    .slice(0, 3)
-    .map(item => `${item.activity} (${item.count})`)
-    .join(", ");
-  const eventPreview = cluster.eventIds.slice(0, 5).join(", ");
-  const eventTail = cluster.eventIds.length > 5 ? ` (+${cluster.eventIds.length - 5} more)` : "";
-  return `<div class="tip-title">Shared-event cluster</div><div class="tip-row">Events: <b>${cluster.eventCount}</b></div><div class="tip-row">Entities: <b>${cluster.sharedEntityCount}</b></div><div class="tip-row">Entity types: <b>${cluster.entityTypes.join(", ") || "n/a"}</b></div><div class="tip-row">Time span: <b>${timeLabel}</b></div><div class="tip-row">Top activities: <b>${topActivities || "n/a"}</b></div><div class="tip-row" style="margin-top:5px;color:var(--accent);font-size:10px">Click to isolate this shared-event cluster</div><div class="tip-divider"></div><div class="tip-row">Event ids: <b>${eventPreview}${eventTail}</b></div>`;
 }
 
 function _laneTooltip(lane) {

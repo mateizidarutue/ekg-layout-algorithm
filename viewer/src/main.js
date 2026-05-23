@@ -1561,6 +1561,7 @@ function _fitDetailView() {
   _fitToView(_lastTotalHeight, { alignTop: true, alignLeft: true, minScale: 0.34, padX: 28, padY: 26, preferWidth: true, lockZoomFloor: true });
 }
 
+
 function _resetZoom() {
   if (!svg) return;
   _fitCurrentView();
