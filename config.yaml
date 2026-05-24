@@ -1,7 +1,10 @@
 neo4j:
   uri: neo4j://127.0.0.1:7687
   user: neo4j
-  password: neo4j2005
+  # Password is resolved from the NEO4J_PASSWORD environment variable.
+  # For local dev convenience you may set a literal fallback below, but DO NOT
+  # commit a real password to version control.
+  password: ${NEO4J_PASSWORD}
   default_database: bep1
 
 datasets:

@@ -3,24 +3,25 @@
 import { navigate } from "../router.js";
 import { getVariantOverview } from "../data/store.js";
 
-const TASKS = [
+const PRIMARY_TASK = {
+  id: "T1", route: "atlas", label: "EKG Atlas",
+  tuple: "⟨Overview, Complete EKG⟩",
+  desc: "Inspect the entire knowledge graph at once: entity-type structure, temporal density, and per-type activity flows in one coordinated view. Drill in by clicking any type or activity.",
+};
+
+const SUPPORTING_TASKS = [
   {
-    id: "T1", route: "identify", label: "Lifecycle",
+    id: "T2", route: "identify", label: "Identify (Lifecycle)",
     tuple: "⟨Identify, Path⟩",
     desc: "Open one entity and read its full lifecycle along the shared time axis, including bottleneck waits.",
   },
   {
-    id: "T2", route: "compare", label: "Variants & Comparison",
+    id: "T3", route: "compare", label: "Compare (Variants)",
     tuple: "⟨Compare, Paths⟩",
-    desc: "Group entities by behaviour into variants, then place multiple lifelines on the same canvas to compare dominant and deviant flows.",
+    desc: "Group entities into behavioural variants, then place multiple lifelines on the same canvas to compare dominant and deviant flows.",
   },
   {
-    id: "T3", route: "summarize", label: "Process Overview",
-    tuple: "⟨Summarize, Topology⟩",
-    desc: "See how the dataset partitions into behavioural communities; identify outlier groups and shared activity patterns at the population scale.",
-  },
-  {
-    id: "T4", route: "explore", label: "Shared Events",
+    id: "T4", route: "explore", label: "Explore (Shared Events)",
     tuple: "⟨Explore, Features⟩",
     desc: "Find shared events where multiple entity lifecycles intersect — the synchronisation points that distinguish object-centric processes from flat event logs.",
   },
@@ -91,10 +92,22 @@ export function renderHome(store, manifest, currentDatasetName) {
         </table>
       </section>
 
-      <!-- Task cards -->
+      <!-- Primary task: Complete EKG Atlas -->
       <section>
+        <a href="${_esc("#/" + PRIMARY_TASK.route)}" class="task-card task-card--primary" data-route="${_esc(PRIMARY_TASK.route)}">
+          <span class="task-card-badge task-card-badge-${_esc(PRIMARY_TASK.id)}">${_esc(PRIMARY_TASK.id)}</span>
+          <span class="task-card-tuple">${_esc(PRIMARY_TASK.tuple)}</span>
+          <span class="task-card-title">${_esc(PRIMARY_TASK.label)}</span>
+          <span class="task-card-desc">${_esc(PRIMARY_TASK.desc)}</span>
+          <span class="task-card-cta">Open EKG Atlas →</span>
+        </a>
+      </section>
+
+      <!-- Supporting tasks -->
+      <section>
+        <div class="home-supporting-label">Supporting tasks · drill-down views</div>
         <div class="home-task-cards">
-          ${TASKS.map(t => `
+          ${SUPPORTING_TASKS.map(t => `
             <a href="${_esc("#/" + t.route)}" class="task-card" data-route="${_esc(t.route)}">
               <span class="task-card-badge task-card-badge-${_esc(t.id)}">${_esc(t.id)}</span>
               <span class="task-card-tuple">${_esc(t.tuple)}</span>

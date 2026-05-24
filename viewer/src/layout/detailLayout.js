@@ -1,28 +1,50 @@
 "use strict";
 
-export const DETAIL_PAD_X = 34;
-export const DETAIL_PAD_TOP = 34;
-export const DETAIL_PAD_BOTTOM = 34;
-export const EVENT_TRACK_Y = 84;
-export const TIMELINE_X0 = 304;
-export const TIMELINE_PAD_R = 54;
-export const BAND_HEADER_H = 34;
-export const LANE_H = 36;
-export const BAND_GAP = 24;
-export const EVENT_ANCHOR_R = 6.5;
-export const LANE_MARKER_R = 5;
-export const RELATION_PORT_X = TIMELINE_X0 - 26;
+// All tunable geometry for the detail (T2 Identify / T3 Compare) layout lives
+// in one place to make it discoverable, reviewable, and easy to tweak.
+//
+// Group meanings:
+//   pad      — outer canvas padding
+//   timeline — horizontal time axis position & padding
+//   band     — vertical band header + lane geometry
+//   anchor   — solo-event anchor circles above the timeline
+//   shared   — clustered shared-event lanes above the timeline
+//   header   — vertical space reserved for the band header chrome
+export const LAYOUT_CONFIG = Object.freeze({
+  pad:      { x: 34, top: 34, bottom: 34 },
+  timeline: { x0: 304, padR: 54, trackY: 84 },
+  band:     { headerH: 34, laneH: 36, gap: 24 },
+  anchor:   { r: 6.5, laneMarkerR: 5, stackGap: 18, baseOffset: 12, clearance: 15 },
+  shared:   { gap: 0, rowGap: 30, baseOffset: 16, h: 22, clearance: 14, laneGap: 38 },
+  header:   { reservedH: 86 },
+  relation: { portOffset: 26 },
+});
 
-const EVENT_STACK_GAP = 18;
-const EVENT_STACK_BASE_OFFSET = 12;
-const EVENT_STACK_CLEARANCE = 15;
-const SHARED_CLUSTER_GAP = 0;
-const SHARED_CLUSTER_ROW_GAP = 30;
-const SHARED_CLUSTER_BASE_OFFSET = 16;
-const SHARED_CLUSTER_H = 22;
-const SHARED_CLUSTER_CLEARANCE = 14;
-const SHARED_CLUSTER_LANE_GAP = 38;
-const HEADER_RESERVED_H = 86;
+// Named exports retained so existing imports throughout the viewer keep
+// working without modification. New code should prefer LAYOUT_CONFIG.
+export const DETAIL_PAD_X      = LAYOUT_CONFIG.pad.x;
+export const DETAIL_PAD_TOP    = LAYOUT_CONFIG.pad.top;
+export const DETAIL_PAD_BOTTOM = LAYOUT_CONFIG.pad.bottom;
+export const EVENT_TRACK_Y     = LAYOUT_CONFIG.timeline.trackY;
+export const TIMELINE_X0       = LAYOUT_CONFIG.timeline.x0;
+export const TIMELINE_PAD_R    = LAYOUT_CONFIG.timeline.padR;
+export const BAND_HEADER_H     = LAYOUT_CONFIG.band.headerH;
+export const LANE_H            = LAYOUT_CONFIG.band.laneH;
+export const BAND_GAP          = LAYOUT_CONFIG.band.gap;
+export const EVENT_ANCHOR_R    = LAYOUT_CONFIG.anchor.r;
+export const LANE_MARKER_R     = LAYOUT_CONFIG.anchor.laneMarkerR;
+export const RELATION_PORT_X   = LAYOUT_CONFIG.timeline.x0 - LAYOUT_CONFIG.relation.portOffset;
+
+const EVENT_STACK_GAP          = LAYOUT_CONFIG.anchor.stackGap;
+const EVENT_STACK_BASE_OFFSET  = LAYOUT_CONFIG.anchor.baseOffset;
+const EVENT_STACK_CLEARANCE    = LAYOUT_CONFIG.anchor.clearance;
+const SHARED_CLUSTER_GAP       = LAYOUT_CONFIG.shared.gap;
+const SHARED_CLUSTER_ROW_GAP   = LAYOUT_CONFIG.shared.rowGap;
+const SHARED_CLUSTER_BASE_OFFSET = LAYOUT_CONFIG.shared.baseOffset;
+const SHARED_CLUSTER_H         = LAYOUT_CONFIG.shared.h;
+const SHARED_CLUSTER_CLEARANCE = LAYOUT_CONFIG.shared.clearance;
+const SHARED_CLUSTER_LANE_GAP  = LAYOUT_CONFIG.shared.laneGap;
+const HEADER_RESERVED_H        = LAYOUT_CONFIG.header.reservedH;
 
 export function computeDetailLayout(graph, width) {
   const totalWidth = Math.max(width - 18, TIMELINE_X0 + 420);

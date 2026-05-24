@@ -26,10 +26,11 @@ export function updateTopbar(route, store) {
 
   const MAP = {
     home:      { task: "",   label: "Home" },
-    identify:  { task: "T1", label: "Identify" },
-    compare:   { task: "T2", label: "Compare" },
-    summarize: { task: "T3", label: "Summarize" },
+    atlas:     { task: "T1", label: "EKG Atlas" },
+    identify:  { task: "T2", label: "Identify" },
+    compare:   { task: "T3", label: "Compare" },
     explore:   { task: "T4", label: "Explore" },
+    summarize: { task: "",   label: "Process variants" },
   };
 
   const info = MAP[route.name] ?? MAP.home;
@@ -39,7 +40,9 @@ export function updateTopbar(route, store) {
   sep.style.display      = route.name === "home" ? "none" : "";
 
   let ctxText = "";
-  if (route.name === "identify" && !route.params.entity) {
+  if (route.name === "atlas") {
+    ctxText = "Complete view";
+  } else if (route.name === "identify" && !route.params.entity) {
     ctxText = "Pick entity";
   } else if (route.name === "identify" && route.params.entity) {
     const entity = store?.entityById?.[route.params.entity];

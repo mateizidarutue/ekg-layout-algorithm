@@ -2,13 +2,15 @@
 
 import { loadDataset, loadManifest, datasetUrl, datasetFromQuery } from "./data/loader.js";
 import {
-  buildStore, getStore, getVariantOverview, getTypeEKGGraph,
+  buildStore, getStore, getVariantOverview, getTypeEKGGraph, getEkgAtlas,
   getActivityDfGraph, getDetailGraph, getGlobalSharedEventHotspots, getSharedEventOverview, getEntitiesForHotspot,
 } from "./data/store.js";
 import { computeDetailLayout } from "./layout/detailLayout.js";
 import { computeVariantLayout, computeDfGraphLayout, computeTypeEKGLayout } from "./layout/overviewLayout.js";
+import { computeAtlasLayout } from "./layout/atlasLayout.js";
 import { drawDetailView } from "./render/detailRender.js";
 import { drawVariantOverview, drawTypeEKGView } from "./render/overviewRender.js";
+import { drawAtlasView } from "./render/atlasRender.js";
 import {
   addMarkers, wheelDelta, computeFitTransform, formatPercent,
   ZOOM_MIN_SCALE, ZOOM_MAX_SCALE, CAMERA_EASE_MS,
@@ -18,6 +20,7 @@ import { renderHome } from "./screens/home.js";
 import { renderIdentifyPicker } from "./screens/identify.js";
 import { renderExploreList, renderExploreClusterDetail, updateHotspotSummary } from "./screens/explore.js";
 import { renderSummarizeScreen, updateSummarizeSidebar } from "./screens/summarize.js";
+import { renderAtlasScreen, updateAtlasSidebar, parseAtlasFocus, normalizeAtlasTab, _registerAtlasStore } from "./screens/atlas.js";
 import { updateSidebarRoute, updateTopbar, renderCompareStrip } from "./screens/sidebar.js";
 
 // ── SVG / camera ──────────────────────────────────────────────────────────────
@@ -37,6 +40,8 @@ let _lastTotalHeight = 0;
 let _detailGraph = null;
 let _variantData = null;
 let _tekgData = null;
+let _atlasData = null;
+let _atlasTypeFilter = null;
 let _selection = null;
 let _entitySearchQuery = "";
 let _lastListKey = null;
@@ -127,6 +132,8 @@ function _afterLoad(store, name) {
   _detailGraph = null;
   _variantData = null;
   _tekgData = null;
+  _atlasData = null;
+  _atlasTypeFilter = null;
   _selection = null;
   _entitySearchQuery = "";
   _lastListKey = null;
@@ -174,6 +181,7 @@ function handleRoute(route) {
 
   // Determine if this route uses the DOM screen-host
   const isDomScreen = route.name === "home"
+    || route.name === "atlas"
     || route.name === "explore"
     || (route.name === "identify" && !route.params.entity);
   if (screenHost) screenHost.classList.toggle("hidden", !isDomScreen);
@@ -202,6 +210,28 @@ function _renderLayers(route, store) {
   switch (route.name) {
     case "home": {
       renderHome(store, _manifest, _currentDatasetName);
+      break;
+    }
+    case "atlas": {
+      _atlasData = getEkgAtlas({ activities: _filters.activities });
+      const focus = parseAtlasFocus(route.params.focus);
+      const tab = normalizeAtlasTab(route.params.tab);
+      _atlasTypeFilter = focus?.kind === "type" ? focus.value : null;
+      _registerAtlasStore(store);
+      renderAtlasScreen({
+        atlas: _atlasData,
+        store,
+        focus,
+        tab,
+        hoverCallbacks: { show: _showTooltip, hide: _hideTooltip },
+      });
+      updateSidebarRoute(route, { compareMode: _compareMode, exploreDrilled: false });
+      updateAtlasSidebar(_atlasData, focus);
+      updateSummarizeSidebar(null);
+      _updateDetailPanels(null);
+      _updateVariantPanels(null, null);
+      _updateClusterActivityPanel(null);
+      _syncMaxEntitiesSlider(null);
       break;
     }
     case "identify": {
@@ -863,7 +893,7 @@ function _handleCanvasWheel(event) {
 
 function _isCanvasRouteActive() {
   const route = getRoute();
-  return !(route.name === "home" || route.name === "explore" || (route.name === "identify" && !route.params.entity));
+  return !(route.name === "home" || route.name === "atlas" || route.name === "explore" || (route.name === "identify" && !route.params.entity));
 }
 
 function _isTypingTarget(target) {
@@ -1061,8 +1091,22 @@ function _setActiveEntityInList(entityId) {
 function _updateHeaderTags(route, store) {
   const tagEl = document.getElementById("panel-view-tag");
   if (!tagEl) return;
-  const names = { home: "HOME", identify: "LIFECYCLE", compare: "COMPARE", summarize: "OVERVIEW", explore: "EXPLORE" };
+  const names = { home: "HOME", atlas: "ATLAS", identify: "LIFECYCLE", compare: "COMPARE", summarize: "VARIANTS", explore: "EXPLORE" };
   tagEl.textContent = names[route.name] ?? route.name.toUpperCase();
+}
+
+function _onAtlasTypeSelect(typeName) {
+  const store = getStore();
+  // Drill: pick the first entity of this type and open the Identify view.
+  const candidates = (store.entityIdsByType?.[typeName] ?? []);
+  if (!candidates.length) return;
+  // Largest first
+  const best = [...candidates].sort((a, b) => {
+    const ea = (store.eventsByEntityId?.[a] ?? []).length;
+    const eb = (store.eventsByEntityId?.[b] ?? []).length;
+    return eb - ea;
+  })[0];
+  navigate("identify", { entity: best });
 }
 
 function _updateStatusBar(store) {
