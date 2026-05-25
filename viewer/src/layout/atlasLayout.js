@@ -1,5 +1,10 @@
 "use strict";
 
+// ─── LEGACY (v1) ────────────────────────────────────────────────────────────
+// Layout for the legacy three-panel Atlas. The new T1 layout is in
+// layout/ekgViewLayout.js. Don't extend this file.
+// ────────────────────────────────────────────────────────────────────────────
+
 // EKG Atlas — multi-panel layout for the complete-EKG (T1) view.
 //
 // The Atlas is composed of three stacked panels sharing the canvas width:

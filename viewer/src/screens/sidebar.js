@@ -25,12 +25,15 @@ export function updateTopbar(route, store) {
   if (!taskChip) return;
 
   const MAP = {
-    home:      { task: "",   label: "Home" },
-    atlas:     { task: "T1", label: "EKG Atlas" },
-    identify:  { task: "T2", label: "Identify" },
-    compare:   { task: "T3", label: "Compare" },
-    explore:   { task: "T4", label: "Explore" },
-    summarize: { task: "",   label: "Process variants" },
+    home:          { task: "",    label: "Home" },
+    ekg:           { task: "T1",  label: "EKG Overview" },
+    "ekg-v3":      { task: "T1",  label: "EKG Overview" },   // backward-compat alias
+    "ekg-legacy":  { task: "T1‑L", label: "EKG Legacy (multi-scale)" },
+    atlas:         { task: "",    label: "Legacy Atlas" },
+    identify:      { task: "T2",  label: "Identify" },
+    compare:       { task: "T3",  label: "Compare" },
+    explore:       { task: "T4",  label: "Explore" },
+    summarize:     { task: "",    label: "Process variants" },
   };
 
   const info = MAP[route.name] ?? MAP.home;
@@ -40,8 +43,13 @@ export function updateTopbar(route, store) {
   sep.style.display      = route.name === "home" ? "none" : "";
 
   let ctxText = "";
-  if (route.name === "atlas") {
-    ctxText = "Complete view";
+  if (route.name === "ekg" || route.name === "ekg-v3") {
+    ctxText = "Type interaction map";
+  } else if (route.name === "ekg-legacy") {
+    const levels = { "0": "L0 Galaxy", "1": "L1 District", "2": "L2 Neighbourhood", "3": "L3 Street" };
+    ctxText = levels[route.params.level ?? "1"] ?? "Multi-scale view";
+  } else if (route.name === "atlas") {
+    ctxText = "Legacy · complete view";
   } else if (route.name === "identify" && !route.params.entity) {
     ctxText = "Pick entity";
   } else if (route.name === "identify" && route.params.entity) {

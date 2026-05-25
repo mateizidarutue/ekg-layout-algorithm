@@ -176,8 +176,12 @@ export function computeDetailLayout(graph, width) {
         x: anchor.x,
         y1: axisY,
         y2: Math.max(...membershipYs) + LANE_MARKER_R + 3,
+        // entityCount = entities visible in this view; totalEntityCount = raw data scope.
         entityCount: anchor.sharedEntityIds.length,
+        totalEntityCount: anchor.totalEntityCount ?? anchor.sharedEntityIds.length,
+        totalEntityTypes: anchor.totalEntityTypes ?? anchor.sharedEntityTypes ?? [],
         sharedEntityIds: anchor.sharedEntityIds,
+        sharedEntityTypes: anchor.sharedEntityTypes ?? [],
         activityColor: anchor.activityColor ?? "#64748b",
       };
     })
@@ -312,9 +316,9 @@ function _buildSharedEventClusters(sharedAnchors) {
     activityCounts.push(...[...activityCountByName.values()].sort((a, b) => b.count - a.count || a.activity.localeCompare(b.activity)));
     const activityPalette = [...new Set(cluster.anchors.map(anchor => anchor.activityColor ?? "#64748b"))].slice(0, 4);
     const sharedEntityIds = [...new Set(cluster.anchors.flatMap(anchor => anchor.sharedEntityIds ?? []))];
-    const entityTypes = [...new Set(cluster.anchors.flatMap(anchor =>
-      (anchor.memberships ?? []).map(membership => membership.entity_type)
-    ))];
+    // Total entity count across all anchors in the cluster, using raw (unfiltered) counts.
+    const totalEntityCount = cluster.anchors.reduce((sum, anchor) => sum + (anchor.totalEntityCount ?? anchor.sharedEntityIds?.length ?? 0), 0);
+    const entityTypes = [...new Set(cluster.anchors.flatMap(anchor => anchor.totalEntityTypes ?? (anchor.memberships ?? []).map(membership => membership.entity_type)))];
     const spanWidth = Math.max(0, cluster.maxX - cluster.minX);
     const width = Math.max(40, Math.min(170, spanWidth + 24 + activityPalette.length * 8 + String(eventIds.length).length * 8));
     return {
@@ -331,6 +335,7 @@ function _buildSharedEventClusters(sharedAnchors) {
       maxTime: cluster.anchors.at(-1)?.date?.getTime?.() ?? null,
       sharedEntityIds,
       sharedEntityCount: sharedEntityIds.length,
+      totalEntityCount,
       entityTypes,
       width,
       height: SHARED_CLUSTER_H,

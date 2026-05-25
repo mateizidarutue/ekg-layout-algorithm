@@ -1,5 +1,10 @@
 "use strict";
 
+// ─── LEGACY (v1) ────────────────────────────────────────────────────────────
+// Renderer for the legacy three-panel Atlas. The new T1 renderer is in
+// render/ekgViewRender.js. Don't extend this file.
+// ────────────────────────────────────────────────────────────────────────────
+
 // Render the EKG Atlas (the new primary T1 view).
 //
 // The atlas is drawn as three stacked SVG panels into the supplied root <g>

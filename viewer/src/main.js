@@ -2,7 +2,7 @@
 
 import { loadDataset, loadManifest, datasetUrl, datasetFromQuery } from "./data/loader.js";
 import {
-  buildStore, getStore, getVariantOverview, getTypeEKGGraph, getEkgAtlas,
+  buildStore, getStore, getVariantOverview, getTypeEKGGraph, getEkgAtlas, getEkgView,
   getActivityDfGraph, getDetailGraph, getGlobalSharedEventHotspots, getSharedEventOverview, getEntitiesForHotspot,
 } from "./data/store.js";
 import { computeDetailLayout } from "./layout/detailLayout.js";
@@ -21,6 +21,8 @@ import { renderIdentifyPicker } from "./screens/identify.js";
 import { renderExploreList, renderExploreClusterDetail, updateHotspotSummary } from "./screens/explore.js";
 import { renderSummarizeScreen, updateSummarizeSidebar } from "./screens/summarize.js";
 import { renderAtlasScreen, updateAtlasSidebar, parseAtlasFocus, normalizeAtlasTab, _registerAtlasStore } from "./screens/atlas.js";
+import { renderEkgScreen, parseEkgUrlState } from "./screens/ekg.js";
+import { renderEkgV3Screen } from "./screens/ekgV3.js";
 import { updateSidebarRoute, updateTopbar, renderCompareStrip } from "./screens/sidebar.js";
 
 // ── SVG / camera ──────────────────────────────────────────────────────────────
@@ -181,6 +183,9 @@ function handleRoute(route) {
 
   // Determine if this route uses the DOM screen-host
   const isDomScreen = route.name === "home"
+    || route.name === "ekg"
+    || route.name === "ekg-v3"
+    || route.name === "ekg-legacy"
     || route.name === "atlas"
     || route.name === "explore"
     || (route.name === "identify" && !route.params.entity);
@@ -210,6 +215,45 @@ function _renderLayers(route, store) {
   switch (route.name) {
     case "home": {
       renderHome(store, _manifest, _currentDatasetName);
+      break;
+    }
+    // T1 primary view — the macro EKG overview (Option 1 prototype).
+    // "ekg-v3" is kept as a backward-compatible alias so old bookmarks still
+    // work; it just falls through to the same render logic.
+    case "ekg":
+    // eslint-disable-next-line no-fallthrough
+    case "ekg-v3": {
+      const ekgData = getEkgView({ activities: _filters.activities });
+      renderEkgV3Screen({
+        data: ekgData,
+        store,
+        hoverCallbacks: { show: _showTooltip, hide: _hideTooltip },
+      });
+      updateSidebarRoute(route, { compareMode: _compareMode, exploreDrilled: false });
+      updateSummarizeSidebar(null);
+      _updateDetailPanels(null);
+      _updateVariantPanels(null, null);
+      _updateClusterActivityPanel(null);
+      _syncMaxEntitiesSlider(null);
+      break;
+    }
+    // Legacy multi-scale view (L0–L3) — preserved under /ekg-legacy for
+    // reference and side-by-side comparison.
+    case "ekg-legacy": {
+      const ekgData = getEkgView({ activities: _filters.activities });
+      const urlState = parseEkgUrlState(route.params);
+      renderEkgScreen({
+        data: ekgData,
+        store,
+        urlState,
+        hoverCallbacks: { show: _showTooltip, hide: _hideTooltip },
+      });
+      updateSidebarRoute(route, { compareMode: _compareMode, exploreDrilled: false });
+      updateSummarizeSidebar(null);
+      _updateDetailPanels(null);
+      _updateVariantPanels(null, null);
+      _updateClusterActivityPanel(null);
+      _syncMaxEntitiesSlider(null);
       break;
     }
     case "atlas": {
@@ -293,11 +337,15 @@ function _renderLayers(route, store) {
     }
     case "explore": {
       const clusterId = route.params.cluster;
+      // Date filter and focus type can be passed in URL params when navigating
+      // from T1 (EKG Overview). Convert epoch-ms strings to Date objects.
+      const exploreFrom = route.params.dateFrom ? new Date(Number(route.params.dateFrom)) : null;
+      const exploreTo   = route.params.dateTo   ? new Date(Number(route.params.dateTo))   : null;
       if (clusterId) {
-        _renderExploreDetail(route, store, w, lBg, lMeta, lRel, lCorr, lDf, lNodes, lLabels, cb, clusterId);
+        _renderExploreDetail(route, store, w, lBg, lMeta, lRel, lCorr, lDf, lNodes, lLabels, cb, clusterId, exploreFrom, exploreTo);
       } else {
-        const hotspots = getGlobalSharedEventHotspots({ activities: _filters.activities, minSharedEntities: 3 });
-        const sharedOverview = getSharedEventOverview({ activities: _filters.activities, limit: 10, minSharedEntities: 3 });
+        const hotspots = getGlobalSharedEventHotspots({ activities: _filters.activities, minSharedEntities: 3, dateFrom: exploreFrom, dateTo: exploreTo });
+        const sharedOverview = getSharedEventOverview({ activities: _filters.activities, limit: 10, minSharedEntities: 3, dateFrom: exploreFrom, dateTo: exploreTo });
         renderExploreList(hotspots, sharedOverview);
         updateSidebarRoute(route, { compareMode: _compareMode, exploreDrilled: false });
       }
@@ -381,12 +429,16 @@ function _renderCompareDetail(route, store, w, lBg, lMeta, lRel, lCorr, lDf, lNo
   _applyAccentLanes(_accentMap);
 }
 
-function _renderExploreDetail(route, store, w, lBg, lMeta, lRel, lCorr, lDf, lNodes, lLabels, cb, clusterId) {
+function _renderExploreDetail(route, store, w, lBg, lMeta, lRel, lCorr, lDf, lNodes, lLabels, cb, clusterId, dateFrom = null, dateTo = null) {
   _updateDetailPanels(null);
-  const entityIds = getEntitiesForHotspot(clusterId, { maxEntities: EXPLORE_ENTITY_LIMIT });
+  // focusType is carried from T1 when the user drills in from a focused type.
+  // getEntitiesForHotspot uses it to pick an anchor of that type so the T4
+  // view opens centred on the same type the analyst had highlighted.
+  const focusType = route.params.focusType ?? null;
+  const entityIds = getEntitiesForHotspot(clusterId, { maxEntities: EXPLORE_ENTITY_LIMIT, dateFrom, dateTo, focusType });
   if (!entityIds.length) {
     const host = document.getElementById("screen-host");
-    if (host) host.innerHTML = `<div style="padding:48px 32px;color:var(--text-muted,#94a3b8);font-size:14px">No entity data found for this cluster.</div>`;
+    if (host) host.innerHTML = `<div style="padding:48px 32px;color:var(--text-muted,#94a3b8);font-size:14px">No entity data found for this cluster${dateFrom ? " in the selected date range" : ""}.</div>`;
     return;
   }
   const anchorId = entityIds[0];
@@ -402,6 +454,10 @@ function _renderExploreDetail(route, store, w, lBg, lMeta, lRel, lCorr, lDf, lNo
     maxEntitiesPerType,
     sharedOnly: true,
     minSharedEntities: 3,
+    // Date filter carried from T1 — filters which events appear in the
+    // lifecycle timelines so only in-window events are shown.
+    dateFrom,
+    dateTo,
   });
   const renderGraph = _resolveDetailRenderGraph(_detailGraph);
   renderExploreClusterDetail(renderGraph);
@@ -409,7 +465,9 @@ function _renderExploreDetail(route, store, w, lBg, lMeta, lRel, lCorr, lDf, lNo
   _syncMaxEntitiesSlider(_detailGraph);
   _renderEntityTypeFilters(_detailGraph);
 
-  const hotspots = getGlobalSharedEventHotspots({ minSharedEntities: 3 });
+  // Use the same date filter when looking up the hotspot summary so
+  // the event count shown in the header reflects the filtered window.
+  const hotspots = getGlobalSharedEventHotspots({ minSharedEntities: 3, dateFrom, dateTo });
   const hotspot = hotspots.find(h => h.id === clusterId);
   if (hotspot) updateHotspotSummary(hotspot);
 }
@@ -893,7 +951,7 @@ function _handleCanvasWheel(event) {
 
 function _isCanvasRouteActive() {
   const route = getRoute();
-  return !(route.name === "home" || route.name === "atlas" || route.name === "explore" || (route.name === "identify" && !route.params.entity));
+  return !(route.name === "home" || route.name === "ekg" || route.name === "ekg-v3" || route.name === "ekg-legacy" || route.name === "atlas" || route.name === "explore" || (route.name === "identify" && !route.params.entity));
 }
 
 function _isTypingTarget(target) {

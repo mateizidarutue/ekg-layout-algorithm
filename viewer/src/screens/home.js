@@ -4,9 +4,9 @@ import { navigate } from "../router.js";
 import { getVariantOverview } from "../data/store.js";
 
 const PRIMARY_TASK = {
-  id: "T1", route: "atlas", label: "EKG Atlas",
-  tuple: "⟨Overview, Complete EKG⟩",
-  desc: "Inspect the entire knowledge graph at once: entity-type structure, temporal density, and per-type activity flows in one coordinated view. Drill in by clicking any type or activity.",
+  id: "T1", route: "ekg", label: "EKG Overview",
+  tuple: "⟨Overview, Filter, Details on Demand⟩",
+  desc: "The entity-type interaction map and event volume timeline in one place. Click a type to focus it across both panels — the schema dims non-neighbours, the timeline isolates its volume profile, and the detail panel shows top activities, entities, and structural connections. Drag the timeline to set a date filter.",
 };
 
 const SUPPORTING_TASKS = [
@@ -99,7 +99,7 @@ export function renderHome(store, manifest, currentDatasetName) {
           <span class="task-card-tuple">${_esc(PRIMARY_TASK.tuple)}</span>
           <span class="task-card-title">${_esc(PRIMARY_TASK.label)}</span>
           <span class="task-card-desc">${_esc(PRIMARY_TASK.desc)}</span>
-          <span class="task-card-cta">Open EKG Atlas →</span>
+          <span class="task-card-cta">Open EKG Overview →</span>
         </a>
       </section>
 
@@ -116,6 +116,11 @@ export function renderHome(store, manifest, currentDatasetName) {
               <span class="task-card-cta">Open →</span>
             </a>
           `).join("")}
+        </div>
+        <div class="home-legacy-row">
+          <a href="#/ekg-legacy" class="home-legacy-link" data-route="ekg-legacy">EKG Legacy (multi-scale L0–L3) →</a>
+          <a href="#/atlas" class="home-legacy-link" data-route="atlas">Open legacy Atlas →</a>
+          <span class="home-legacy-hint">Legacy views kept for reference. T1 is now the EKG Overview above.</span>
         </div>
       </section>
 

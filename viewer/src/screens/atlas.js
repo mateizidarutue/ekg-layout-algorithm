@@ -1,5 +1,13 @@
 "use strict";
 
+// ─── LEGACY (v1) ────────────────────────────────────────────────────────────
+// The new primary T1 view lives in screens/ekg.js (route /ekg). This file is
+// kept around for comparison while the new view is being evaluated, and is
+// reachable from the home screen's "Open legacy Atlas →" link. Don't extend
+// it; new work goes into screens/ekg.js, layout/ekgViewLayout.js, and
+// render/ekgViewRender.js.
+// ────────────────────────────────────────────────────────────────────────────
+
 // EKG Atlas — interactive exploration screen.
 //
 // The Atlas is the primary T1 view. It's a DOM-driven screen (rendered into

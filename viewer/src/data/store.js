@@ -350,9 +350,12 @@ export function buildStore(bundle) {
   const caseOverviewEdges = _buildOverviewRelations(caseSummaryById);
   const { communities, communityByCaseId } = _buildOverviewCommunities(caseSummaryById, caseOverviewEdges);
 
+  const invalidEventCount = events.filter(e => !_hasValidDate(e)).length;
+
   _overviewCache.clear();
   _store = {
     bundle,
+    invalidEventCount,
     entities,
     entityById: maps.entityById,
     entityIdsByType,
@@ -517,6 +520,10 @@ export function getDetailGraph(options = {}) {
       memberships,
       sharedEntityIds: memberships.map(membership => membership.entity_id),
       sharedEntityTypes: [...new Set(memberships.map(membership => membership.entity_type))],
+      // totalEntityCount / totalEntityTypes come from _buildEventAnchor and reflect
+      // the raw data scope; preserve them through this second view-filtering pass.
+      totalEntityCount: anchor.totalEntityCount ?? memberships.length,
+      totalEntityTypes: anchor.totalEntityTypes ?? [...new Set(memberships.map(m => m.entity_type))],
     };
   }).filter(anchor => anchor.memberships.length > 0);
 
@@ -916,12 +923,14 @@ export function getActivityCountsForEntity(entityId) {
   return _countBy(_store.eventsByEntityId[entityId] ?? [], event => event.activity);
 }
 
-export function getGlobalSharedEventHotspots({ activities = null, entityTypeFilter = null, sortBy = "frequency", minSharedEntities = 2 } = {}) {
+export function getGlobalSharedEventHotspots({ activities = null, entityTypeFilter = null, sortBy = "frequency", minSharedEntities = 2, dateFrom = null, dateTo = null } = {}) {
   if (!_store) return [];
+  // Apply date + activity filters up front so every downstream calculation
+  // automatically reflects the active time window.
+  const events = _filterEvents(_store.events, { activities, dateFrom, dateTo });
   const byActivity = new Map();
-  _store.events.forEach(event => {
+  events.forEach(event => {
     if (event.entity_ids.length < minSharedEntities) return;
-    if (activities && !activities.has(event.activity)) return;
     const types = [...new Set(event.memberships.map(m => m.entity_type))];
     if (entityTypeFilter && !types.some(t => entityTypeFilter.has(t))) return;
     if (!byActivity.has(event.activity)) {
@@ -1149,6 +1158,188 @@ export function getEkgAtlas(filters = {}) {
   };
 }
 
+// ── EKG View: multi-scale (L0–L3) data aggregator for the new /ekg screen ──
+//
+// Design follows Shneiderman's "overview, zoom and filter, details on demand"
+// mantra (1996) and the Performance Spectrum's time-axis-aligned encoding
+// (Denisov, Belkina & Fahland 2018): one time scale shared across all bands
+// and zoom levels, with the *encoding* changing per level — not the spatial
+// frame. The data layer prepares all four levels' inputs in one pass so the
+// view can switch levels without re-querying the store.
+//
+//   L0 Galaxy        → per-bin × per-type × per-activity counts (heat strips)
+//   L1 District      → activity-flow bands (reuses _buildAtlasActivityBands)
+//   L2 Neighbourhood → per-entity sparklines, sorted chronologically
+//   L3 Street        → caller invokes getDetailGraph lazily on the focus entity
+//
+// Returns shapes documented inline at the return statement.
+const EKG_VIEW_BIN_COUNT = 48;
+
+export function getEkgView(filters = {}) {
+  if (!_store) throw new Error("Store not built.");
+  const { activities = null, dateFrom = null, dateTo = null } = filters;
+
+  const filteredEvents = _filterEvents(_store.events, { activities, dateFrom, dateTo });
+  const filteredEventIdSet = new Set(filteredEvents.map(event => event.event_id));
+
+  // ── Time scale ──
+  const times = filteredEvents.map(event => event.date?.getTime()).filter(Number.isFinite);
+  const timeRange = times.length
+    ? { min: Math.min(...times), max: Math.max(...times) }
+    : { min: 0, max: 1 };
+  const span = Math.max(timeRange.max - timeRange.min, 1);
+  const binWidth = span / EKG_VIEW_BIN_COUNT;
+  const binFor = t => Math.min(EKG_VIEW_BIN_COUNT - 1, Math.max(0, Math.floor((t - timeRange.min) / binWidth)));
+
+  // ── L0 bins: per-bin × per-type × per-activity counts ──
+  // Each event is counted once *per unique entity type it touches*. That keeps
+  // a single event from inflating one type's count while still letting the
+  // total reflect (event, type) pairs. This invariant is what the test suite
+  // verifies via _Stream conservation_.
+  const bins = Array.from({ length: EKG_VIEW_BIN_COUNT }, (_, i) => ({
+    binIndex: i,
+    t0: timeRange.min + i * binWidth,
+    t1: timeRange.min + (i + 1) * binWidth,
+    total: 0,
+    byType: Object.create(null),
+  }));
+
+  filteredEvents.forEach(event => {
+    const t = event.date?.getTime();
+    if (!Number.isFinite(t)) return;
+    const bin = bins[binFor(t)];
+    const seenTypes = new Set();
+    event.memberships.forEach(m => {
+      if (seenTypes.has(m.entity_type)) return;
+      seenTypes.add(m.entity_type);
+      let typeStats = bin.byType[m.entity_type];
+      if (!typeStats) {
+        typeStats = { total: 0, byActivity: Object.create(null) };
+        bin.byType[m.entity_type] = typeStats;
+      }
+      typeStats.total += 1;
+      typeStats.byActivity[event.activity] = (typeStats.byActivity[event.activity] ?? 0) + 1;
+      bin.total += 1;
+    });
+  });
+
+  const globalDensity = bins.map(bin => bin.total);
+
+  // ── L2 sparklines: one row per entity, sorted by firstTime ──
+  const sparklinesByType = Object.create(null);
+  const eventsByEntity = _store.eventsByEntityId ?? {};
+  Object.keys(_store.entityIdsByType ?? {}).forEach(type => {
+    const rows = [];
+    (_store.entityIdsByType[type] ?? []).forEach(entityId => {
+      const entity = _store.entityById[entityId];
+      const events = (eventsByEntity[entityId] ?? [])
+        .filter(event => filteredEventIdSet.has(event.event_id))
+        .map(event => ({
+          event_id: event.event_id,
+          t: event.date?.getTime(),
+          activity: event.activity,
+          activityColor: event.activityColor,
+          isShared: event.entity_ids.length >= 2,
+        }))
+        .filter(event => Number.isFinite(event.t))
+        .sort((a, b) => a.t - b.t);
+      if (!events.length) return;
+      rows.push({
+        entity_id: entityId,
+        label: _entityLabel(entity),
+        primaryType: type,
+        firstTime: events[0].t,
+        lastTime: events[events.length - 1].t,
+        eventCount: events.length,
+        events,
+      });
+    });
+    // Stable order: first-event timestamp asc, ties broken by entity_id so
+    // every test run produces the same array.
+    rows.sort((a, b) => a.firstTime - b.firstTime || a.entity_id.localeCompare(b.entity_id));
+    sparklinesByType[type] = rows;
+  });
+
+  // ── Shared-event spines: one per event touching ≥2 entity types ──
+  const spines = [];
+  filteredEvents.forEach(event => {
+    if (event.entity_ids.length < 2) return;
+    const types = [...new Set(event.memberships.map(m => m.entity_type))].sort();
+    if (types.length < 2) return;
+    const t = event.date?.getTime();
+    if (!Number.isFinite(t)) return;
+    spines.push({
+      event_id: event.event_id,
+      t,
+      activity: event.activity,
+      activityColor: _store.activityColorByName[event.activity] ?? "#64748b",
+      types,
+      sharedEntityIds: [...event.entity_ids],
+      sharedEntityCount: event.entity_ids.length,
+    });
+  });
+  spines.sort((a, b) => a.t - b.t || a.event_id.localeCompare(b.event_id));
+
+  // ── L1 activity bands: reuse the atlas helper (single source of truth) ──
+  const activityBands = _buildAtlasActivityBands(filteredEvents, filteredEventIdSet, timeRange);
+
+  // ── Type metadata, ordered by role (cases → items → other → resource → attribute) ──
+  const typeRegistry = _store.typeRegistry;
+  const eventCountByType = Object.create(null);
+  filteredEvents.forEach(event => {
+    const seen = new Set();
+    event.memberships.forEach(m => {
+      if (seen.has(m.entity_type)) return;
+      seen.add(m.entity_type);
+      eventCountByType[m.entity_type] = (eventCountByType[m.entity_type] ?? 0) + 1;
+    });
+  });
+  const typeNodes = (typeRegistry?.types ?? [])
+    .map(t => ({
+      id: t.name,
+      label: t.displayLabel,
+      role: t.role,
+      color: t.color,
+      entityCount: t.count,
+      eventCount: eventCountByType[t.name] ?? 0,
+      entityCountVisible: (sparklinesByType[t.name] ?? []).length,
+    }))
+    .filter(node => node.entityCount > 0);
+
+  const bandOrder = typeNodes.map(node => node.id);
+
+  // ── Stats ──
+  const stats = {
+    events: filteredEvents.length,
+    totalEvents: _store.events.length,
+    entities: _store.entities.length,
+    entityTypes: typeNodes.length,
+    sharedEvents: spines.length,
+    binCount: EKG_VIEW_BIN_COUNT,
+    invalidEventCount: _store.invalidEventCount ?? 0,
+  };
+
+  return {
+    isEkgView: true,
+    invalidEventCount: _store.invalidEventCount ?? 0,
+    timeRange,
+    binCount: EKG_VIEW_BIN_COUNT,
+    binWidth,
+    bins,
+    globalDensity,
+    sparklinesByType,
+    spines,
+    activityBands,
+    typeNodes,
+    bandOrder,
+    stats,
+    caseType: _store.caseType,
+    itemType: _store.itemType,
+    activityColorByName: _store.activityColorByName,
+    filterContext: { activities, dateFrom, dateTo },
+  };
+}
+
 function _buildAtlasActivityBands(filteredEvents, _filteredEventIdSet, timeRange) {
   const eventsByType = {};
   filteredEvents.forEach(event => {
@@ -1311,12 +1502,11 @@ export function getTypeEKGGraph(filters = {}) {
   };
 }
 
-export function getSharedEventOverview({ activities = null, limit = 10, minSharedEntities = 2 } = {}) {
+export function getSharedEventOverview({ activities = null, limit = 10, minSharedEntities = 2, dateFrom = null, dateTo = null } = {}) {
   if (!_store) return { totalSharedEvents: 0, topActivities: [], topEntityEvents: [], topTypePairs: [] };
-  const sharedEvents = _store.events.filter(event =>
-    event.entity_ids.length >= minSharedEntities && (!activities || activities.has(event.activity))
-  );
-  const topActivities = getGlobalSharedEventHotspots({ activities, sortBy: "frequency", minSharedEntities }).slice(0, limit);
+  const allFiltered = _filterEvents(_store.events, { activities, dateFrom, dateTo });
+  const sharedEvents = allFiltered.filter(event => event.entity_ids.length >= minSharedEntities);
+  const topActivities = getGlobalSharedEventHotspots({ activities, sortBy: "frequency", minSharedEntities, dateFrom, dateTo }).slice(0, limit);
   const typePairCounts = new Map();
   sharedEvents.forEach(event => {
     const types = [...new Set(event.memberships.map(membership => membership.entity_type))].sort();
@@ -1369,10 +1559,12 @@ export function getSharedEventOverview({ activities = null, limit = 10, minShare
   };
 }
 
-export function getEntitiesForHotspot(hotspotId, { maxEntities = 8 } = {}) {
+export function getEntitiesForHotspot(hotspotId, { maxEntities = 8, dateFrom = null, dateTo = null, focusType = null } = {}) {
   if (!_store) return [];
   const activity = hotspotId.startsWith("act:") ? hotspotId.slice(4) : hotspotId;
-  const sharedEvents = _store.events.filter(e => e.activity === activity && e.entity_ids.length > 2);
+  // Apply date filter so only events in the active time window are used.
+  const filteredPool = _filterEvents(_store.events, { activities: new Set([activity]), dateFrom, dateTo });
+  const sharedEvents = filteredPool.filter(e => e.entity_ids.length > 2);
   const entityCounts = {};
   sharedEvents.forEach(e => {
     e.entity_ids.forEach(id => { entityCounts[id] = (entityCounts[id] ?? 0) + 1; });
@@ -1381,7 +1573,12 @@ export function getEntitiesForHotspot(hotspotId, { maxEntities = 8 } = {}) {
     .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
     .map(([id]) => id);
   if (!sorted.length) return [];
-  const anchor = sorted[0];
+  // If a focus type is provided, prefer an entity of that type as the anchor
+  // so T4 opens centred on the type the user had in focus in T1.
+  const focusTypeCandidates = focusType
+    ? sorted.filter(id => _store.entityById[id]?.primary_type === focusType)
+    : [];
+  const anchor = focusTypeCandidates[0] ?? sorted[0];
   const anchorType = _store.entityById[anchor]?.primary_type;
   const rest = sorted.slice(1);
   const byType = {};
@@ -1535,11 +1732,19 @@ function _buildEventAnchor(eventId, visibleEntityIds) {
   if (!memberships.length) return null;
   const sharedEntityIds = memberships.map(membership => membership.entity_id);
   const sharedEntityTypes = [...new Set(memberships.map(membership => membership.entity_type))];
+  // Preserve the raw entity count from the data layer before any view-filtering.
+  // The view-filtered sharedEntityIds can be smaller when maxEntitiesPerType clips
+  // how many entities are loaded into the current graph, but the event itself
+  // participates in more (or different) entities in the full dataset.
+  const totalEntityCount = event.entity_ids?.length ?? sharedEntityIds.length;
+  const totalEntityTypes = [...new Set((event.memberships ?? []).map(m => m.entity_type))];
   return {
     ...event,
     memberships,
     sharedEntityIds,
     sharedEntityTypes,
+    totalEntityCount,
+    totalEntityTypes,
     isSharedEvent: sharedEntityIds.length > 1,
   };
 }
@@ -1687,15 +1892,50 @@ function _collectItemSequences(filters = {}) {
   }).filter(Boolean);
 }
 
+// Centralised event filter — single chokepoint for activity, resource, date
+// window AND invalid-date exclusion. By default any event whose date is not a
+// finite millisecond is dropped, because none of the time-aligned views can
+// position it sensibly on the axis. Callers that genuinely want them (e.g.,
+// a "data quality" listing in the inspector) can opt back in with
+// `{ includeInvalidDates: true }`.
 function _filterEvents(events, filters = {}) {
-  const { activities = null, resource = null, dateFrom = null, dateTo = null } = filters;
+  const {
+    activities = null, resource = null, dateFrom = null, dateTo = null,
+    includeInvalidDates = false,
+  } = filters;
   let out = events;
+  if (!includeInvalidDates) out = out.filter(_hasValidDate);
   if (activities && activities.size > 0) out = out.filter(event => activities.has(event.activity));
   else if (activities && activities.size === 0) out = [];
   if (resource) out = out.filter(event => event.resource_labels?.includes(resource) || event.org_resource === resource);
   if (dateFrom) { const from = new Date(dateFrom); out = out.filter(event => event.date >= from); }
   if (dateTo) { const to = new Date(dateTo); out = out.filter(event => event.date <= to); }
   return out;
+}
+
+function _hasValidDate(event) {
+  return event?.date instanceof Date && Number.isFinite(event.date.getTime());
+}
+
+// Public helper so callers (e.g., screens/ekg.js or T2 Identify's status bar)
+// can list the events that got excluded. Returns a lightweight summary —
+// caller can drill into _store.eventById[event_id] for the full payload.
+export function listInvalidDateEvents({ limit = 50 } = {}) {
+  if (!_store) return [];
+  return _store.events
+    .filter(e => !_hasValidDate(e))
+    .slice(0, limit)
+    .map(e => ({
+      event_id: e.event_id,
+      activity: e.activity,
+      timestamp: e.timestamp,
+      entity_ids: e.entity_ids,
+    }));
+}
+
+export function getInvalidEventCount() {
+  if (!_store) return 0;
+  return _store.invalidEventCount ?? 0;
 }
 
 function _buildCaseSummaries(caseList, eventsByCaseId, itemIdsByCaseId) {

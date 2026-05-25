@@ -49,12 +49,7 @@ export function drawDetailView(layout, lBg, lMeta, lDfPo, lCorr, lRes, lDfItem, 
     .attr("stroke-opacity", 0.30)
     .attr("stroke-linecap", "round")
     .style("cursor", "pointer")
-    .on("mousemove", (ev, d) => cb.onTooltipShow(
-      `<div class="tip-title">${d.activity}</div>
-       <div class="tip-row">Shared event — correlated to <b>×${d.entityCount}</b> entities</div>
-       <div class="tip-row" style="margin-top:4px;color:var(--accent);font-size:10px">One event, multiple corr edges</div>`,
-      ev
-    ))
+    .on("mousemove", (ev, d) => cb.onTooltipShow(_sharedEventTip(d, false), ev))
     .on("mouseleave", cb.onTooltipHide);
 
   // Small event-node dot on the axis for each spine — clickable to select the shared event
@@ -71,12 +66,7 @@ export function drawDetailView(layout, lBg, lMeta, lDfPo, lCorr, lRes, lDfItem, 
       ev.stopPropagation();
       cb.onEventSelect?.({ id: d.event_id, sharedEntityIds: d.sharedEntityIds });
     })
-    .on("mousemove", (ev, d) => cb.onTooltipShow(
-      `<div class="tip-title">${d.activity}</div>
-       <div class="tip-row">Shared event — correlated to <b>×${d.entityCount}</b> entities</div>
-       <div class="tip-row" style="margin-top:4px;color:var(--accent);font-size:10px">Click to highlight all correlated lanes</div>`,
-      ev
-    ))
+    .on("mousemove", (ev, d) => cb.onTooltipShow(_sharedEventTip(d, true), ev))
     .on("mouseleave", cb.onTooltipHide);
 
   lMeta.selectAll(null).data(layout.relationLinks).join("path")
@@ -343,7 +333,12 @@ function _eventTooltip(anchor) {
   const membershipRows = (anchor.memberships ?? [])
     .map(membership => `<div class="tip-row">${membership.entity_type}: <b>${membership.entity_label}</b></div>`)
     .join("");
-  return `<div class="tip-title">${anchor.activity}</div><div class="tip-row">Event: <b>${anchor.event_id}</b></div><div class="tip-row">Time: <b>${timestamp}</b></div><div class="tip-row">Shared: <b>${anchor.sharedEntityIds.length > 1 ? `Yes (${anchor.sharedEntityIds.length})` : "No"}</b></div>${resourceRows}<div class="tip-divider"></div>${membershipRows}`;
+  const totalCount = anchor.totalEntityCount ?? anchor.sharedEntityIds?.length ?? 0;
+  const visibleCount = anchor.sharedEntityIds?.length ?? 0;
+  const sharedLabel = totalCount > 1
+    ? `Yes — ×${totalCount} entities${totalCount !== visibleCount ? ` (${visibleCount} in view)` : ""}`
+    : "No";
+  return `<div class="tip-title">${anchor.activity}</div><div class="tip-row">Event: <b>${anchor.event_id}</b></div><div class="tip-row">Time: <b>${timestamp}</b></div><div class="tip-row">Shared: <b>${sharedLabel}</b></div>${resourceRows}<div class="tip-divider"></div>${membershipRows}`;
 }
 
 function _laneTooltip(lane) {
@@ -355,7 +350,38 @@ function _laneTooltip(lane) {
 
 function _membershipTooltip(lane, anchor) {
   if (!anchor) return "";
-  return `<div class="tip-title">${anchor.activity}</div><div class="tip-row">Entity: <b>${lane.entityLabel}</b></div><div class="tip-row">Type: <b>${lane.entityType}</b></div><div class="tip-row">Time: <b>${anchor.date?.toLocaleString() ?? "n/a"}</b></div><div class="tip-row">Shared entities: <b>${anchor.sharedEntityIds.join(", ")}</b></div>`;
+  const totalCount = anchor.totalEntityCount ?? anchor.sharedEntityIds?.length ?? 0;
+  const visibleCount = anchor.sharedEntityIds?.length ?? 0;
+  const countNote = totalCount > 1
+    ? `×${totalCount} entities${totalCount !== visibleCount ? ` (${visibleCount} visible here)` : ""}`
+    : "1 entity";
+  return `<div class="tip-title">${anchor.activity}</div><div class="tip-row">Entity: <b>${lane.entityLabel}</b></div><div class="tip-row">Type: <b>${lane.entityType}</b></div><div class="tip-row">Time: <b>${anchor.date?.toLocaleString() ?? "n/a"}</b></div><div class="tip-row">Shared: <b>${countNote}</b></div>`;
+}
+
+// Tooltip for event-spine lines and their axis dots.
+// Shows the true entity count from the raw data (totalEntityCount), the entity
+// types involved, and — when the view clips some of those entities — a note
+// of how many are visible in the current graph.
+function _sharedEventTip(d, clickable) {
+  const total = d.totalEntityCount ?? d.entityCount;
+  const inView = d.entityCount;
+  // Entity types participating — use totalEntityTypes (all types in raw data) when
+  // available; fall back to sharedEntityTypes (view-filtered) so something always shows.
+  const types = (d.totalEntityTypes?.length ? d.totalEntityTypes : d.sharedEntityTypes) ?? [];
+  const typesLabel = types.length
+    ? `<div class="tip-row" style="margin-top:2px">Types: <b>${types.join(' · ')}</b></div>`
+    : "";
+  const clippedNote = total > inView
+    ? `<div class="tip-row" style="color:#94a3b8;font-size:10px">${inView} of ${total} entities are visible in this view</div>`
+    : "";
+  const hint = clickable
+    ? `<div class="tip-row" style="margin-top:4px;color:var(--accent);font-size:10px">Click to highlight all correlated lanes</div>`
+    : `<div class="tip-row" style="margin-top:4px;color:var(--accent);font-size:10px">One event — multiple CORR edges</div>`;
+  return `
+    <div class="tip-title">${d.activity}</div>
+    <div class="tip-row">Shared event — correlated to <b>×${total}</b> entities</div>
+    ${typesLabel}${clippedNote}${hint}
+  `;
 }
 
 function _drawLifecycleGlyphs(anchorRail, lNodes) {
