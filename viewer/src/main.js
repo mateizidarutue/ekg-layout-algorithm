@@ -2,27 +2,22 @@
 
 import { loadDataset, loadManifest, datasetUrl, datasetFromQuery } from "./data/loader.js";
 import {
-  buildStore, getStore, getVariantOverview, getTypeEKGGraph, getEkgAtlas, getEkgView,
+  buildStore, getStore, getVariantOverview, getEkgView,
   getActivityDfGraph, getDetailGraph, getGlobalSharedEventHotspots, getSharedEventOverview, getEntitiesForHotspot,
 } from "./data/store.js";
 import { computeDetailLayout } from "./layout/detailLayout.js";
-import { computeVariantLayout, computeDfGraphLayout, computeTypeEKGLayout } from "./layout/overviewLayout.js";
-import { computeAtlasLayout } from "./layout/atlasLayout.js";
+import { computeVariantLayout, computeDfGraphLayout } from "./layout/overviewLayout.js";
 import { drawDetailView } from "./render/detailRender.js";
-import { drawVariantOverview, drawTypeEKGView } from "./render/overviewRender.js";
-import { drawAtlasView } from "./render/atlasRender.js";
+import { drawVariantOverview } from "./render/overviewRender.js";
 import {
-  addMarkers, wheelDelta, computeFitTransform, formatPercent,
-  ZOOM_MIN_SCALE, ZOOM_MAX_SCALE, CAMERA_EASE_MS,
+  addMarkers, wheelDelta, formatPercent,
+  ZOOM_MIN_SCALE, ZOOM_MAX_SCALE,
 } from "./render/shared.js";
 import { startRouter, getRoute, navigate, goBack } from "./router.js";
 import { renderHome } from "./screens/home.js";
 import { renderIdentifyPicker } from "./screens/identify.js";
 import { renderExploreList, renderExploreClusterDetail, updateHotspotSummary } from "./screens/explore.js";
-import { renderSummarizeScreen, updateSummarizeSidebar } from "./screens/summarize.js";
-import { renderAtlasScreen, updateAtlasSidebar, parseAtlasFocus, normalizeAtlasTab, _registerAtlasStore } from "./screens/atlas.js";
-import { renderEkgScreen, parseEkgUrlState } from "./screens/ekg.js";
-import { renderEkgV3Screen } from "./screens/ekgV3.js";
+import { mountSummarizeScreen, unmountSummarizeScreen, updateSummarizeSidebar } from "./screens/summarize.js";
 import { updateSidebarRoute, updateTopbar, renderCompareStrip } from "./screens/sidebar.js";
 
 // ── SVG / camera ──────────────────────────────────────────────────────────────
@@ -41,9 +36,6 @@ let _manifest = { datasets: [] };
 let _lastTotalHeight = 0;
 let _detailGraph = null;
 let _variantData = null;
-let _tekgData = null;
-let _atlasData = null;
-let _atlasTypeFilter = null;
 let _selection = null;
 let _entitySearchQuery = "";
 let _lastListKey = null;
@@ -133,9 +125,6 @@ function _afterLoad(store, name) {
   _accentMap = {};
   _detailGraph = null;
   _variantData = null;
-  _tekgData = null;
-  _atlasData = null;
-  _atlasTypeFilter = null;
   _selection = null;
   _entitySearchQuery = "";
   _lastListKey = null;
@@ -183,14 +172,15 @@ function handleRoute(route) {
 
   // Determine if this route uses the DOM screen-host
   const isDomScreen = route.name === "home"
-    || route.name === "ekg"
-    || route.name === "ekg-v3"
-    || route.name === "ekg-legacy"
-    || route.name === "atlas"
+    || route.name === "summarize"
     || route.name === "explore"
     || (route.name === "identify" && !route.params.entity);
   if (screenHost) screenHost.classList.toggle("hidden", !isDomScreen);
   if (canvas) canvas.style.display = isDomScreen ? "none" : "";
+
+  // T1 population view owns its own canvas inside #screen-host; tear it down
+  // whenever we navigate away so its rAF loop and listeners are cleaned up.
+  if (route.name !== "summarize") unmountSummarizeScreen();
 
   _renderLayers(route, store);
   _updateSidebarList();
@@ -215,67 +205,6 @@ function _renderLayers(route, store) {
   switch (route.name) {
     case "home": {
       renderHome(store, _manifest, _currentDatasetName);
-      break;
-    }
-    // T1 primary view — the macro EKG overview (Option 1 prototype).
-    // "ekg-v3" is kept as a backward-compatible alias so old bookmarks still
-    // work; it just falls through to the same render logic.
-    case "ekg":
-    // eslint-disable-next-line no-fallthrough
-    case "ekg-v3": {
-      const ekgData = getEkgView({ activities: _filters.activities });
-      renderEkgV3Screen({
-        data: ekgData,
-        store,
-        hoverCallbacks: { show: _showTooltip, hide: _hideTooltip },
-      });
-      updateSidebarRoute(route, { compareMode: _compareMode, exploreDrilled: false });
-      updateSummarizeSidebar(null);
-      _updateDetailPanels(null);
-      _updateVariantPanels(null, null);
-      _updateClusterActivityPanel(null);
-      _syncMaxEntitiesSlider(null);
-      break;
-    }
-    // Legacy multi-scale view (L0–L3) — preserved under /ekg-legacy for
-    // reference and side-by-side comparison.
-    case "ekg-legacy": {
-      const ekgData = getEkgView({ activities: _filters.activities });
-      const urlState = parseEkgUrlState(route.params);
-      renderEkgScreen({
-        data: ekgData,
-        store,
-        urlState,
-        hoverCallbacks: { show: _showTooltip, hide: _hideTooltip },
-      });
-      updateSidebarRoute(route, { compareMode: _compareMode, exploreDrilled: false });
-      updateSummarizeSidebar(null);
-      _updateDetailPanels(null);
-      _updateVariantPanels(null, null);
-      _updateClusterActivityPanel(null);
-      _syncMaxEntitiesSlider(null);
-      break;
-    }
-    case "atlas": {
-      _atlasData = getEkgAtlas({ activities: _filters.activities });
-      const focus = parseAtlasFocus(route.params.focus);
-      const tab = normalizeAtlasTab(route.params.tab);
-      _atlasTypeFilter = focus?.kind === "type" ? focus.value : null;
-      _registerAtlasStore(store);
-      renderAtlasScreen({
-        atlas: _atlasData,
-        store,
-        focus,
-        tab,
-        hoverCallbacks: { show: _showTooltip, hide: _hideTooltip },
-      });
-      updateSidebarRoute(route, { compareMode: _compareMode, exploreDrilled: false });
-      updateAtlasSidebar(_atlasData, focus);
-      updateSummarizeSidebar(null);
-      _updateDetailPanels(null);
-      _updateVariantPanels(null, null);
-      _updateClusterActivityPanel(null);
-      _syncMaxEntitiesSlider(null);
       break;
     }
     case "identify": {
@@ -321,14 +250,16 @@ function _renderLayers(route, store) {
       break;
     }
     case "summarize": {
-      _tekgData = getTypeEKGGraph({ activities: _filters.activities });
-      const tekgLayout = computeTypeEKGLayout(_tekgData, w);
-      drawTypeEKGView(tekgLayout, lBg, lMeta, lNodes, lLabels, cb);
-      _lastTotalHeight = tekgLayout.totalHeight;
-      _applyVisibility();
-      _fitToView(_lastTotalHeight);
+      const ekgData = getEkgView({ activities: _filters.activities });
+      mountSummarizeScreen({
+        data: ekgData,
+        store,
+        params: route.params,
+        hoverCallbacks: { show: _showTooltip, hide: _hideTooltip },
+        navigateToDetail: entityId => navigate("identify", { entity: entityId }),
+      });
       updateSidebarRoute(route, { compareMode: _compareMode, exploreDrilled: false });
-      updateSummarizeSidebar(_tekgData);
+      updateSummarizeSidebar(ekgData);
       _updateDetailPanels(null);
       _updateVariantPanels(null, null);
       _updateClusterActivityPanel(null);
@@ -951,7 +882,7 @@ function _handleCanvasWheel(event) {
 
 function _isCanvasRouteActive() {
   const route = getRoute();
-  return !(route.name === "home" || route.name === "ekg" || route.name === "ekg-v3" || route.name === "ekg-legacy" || route.name === "atlas" || route.name === "explore" || (route.name === "identify" && !route.params.entity));
+  return !(route.name === "home" || route.name === "summarize" || route.name === "explore" || (route.name === "identify" && !route.params.entity));
 }
 
 function _isTypingTarget(target) {
@@ -1149,22 +1080,8 @@ function _setActiveEntityInList(entityId) {
 function _updateHeaderTags(route, store) {
   const tagEl = document.getElementById("panel-view-tag");
   if (!tagEl) return;
-  const names = { home: "HOME", atlas: "ATLAS", identify: "LIFECYCLE", compare: "COMPARE", summarize: "VARIANTS", explore: "EXPLORE" };
+  const names = { home: "HOME", summarize: "POPULATION", identify: "LIFECYCLE", compare: "COMPARE", explore: "EXPLORE" };
   tagEl.textContent = names[route.name] ?? route.name.toUpperCase();
-}
-
-function _onAtlasTypeSelect(typeName) {
-  const store = getStore();
-  // Drill: pick the first entity of this type and open the Identify view.
-  const candidates = (store.entityIdsByType?.[typeName] ?? []);
-  if (!candidates.length) return;
-  // Largest first
-  const best = [...candidates].sort((a, b) => {
-    const ea = (store.eventsByEntityId?.[a] ?? []).length;
-    const eb = (store.eventsByEntityId?.[b] ?? []).length;
-    return eb - ea;
-  })[0];
-  navigate("identify", { entity: best });
 }
 
 function _updateStatusBar(store) {
@@ -1174,7 +1091,7 @@ function _updateStatusBar(store) {
   const route = getRoute();
   let tail = `${store.caseType ?? "Cases"}: <b>${store.caseList.length.toLocaleString()}</b>`;
   if (route.name === "summarize") {
-    tail = `Types: <b>${_tekgData?.entityTypes?.length ?? 0}</b>`;
+    tail = `Types: <b>${store?.typeRegistry?.types?.length ?? 0}</b>`;
   } else if (route.name === "compare" && _compareMode === "variants") {
     tail = `Variants: <b>${_variantData?.variantCount?.toLocaleString?.() ?? 0}</b>`;
   } else if (route.name === "identify" && route.params.entity) {

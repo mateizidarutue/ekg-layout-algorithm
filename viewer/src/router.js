@@ -1,6 +1,6 @@
 "use strict";
 
-const VALID_ROUTES = new Set(["home", "ekg", "ekg-v3", "ekg-legacy", "atlas", "identify", "compare", "summarize", "explore"]);
+const VALID_ROUTES = new Set(["home", "identify", "compare", "summarize", "explore"]);
 
 let _onRoute = null;
 let _routeHistory = [];

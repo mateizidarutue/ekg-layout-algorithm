@@ -25,15 +25,11 @@ export function updateTopbar(route, store) {
   if (!taskChip) return;
 
   const MAP = {
-    home:          { task: "",    label: "Home" },
-    ekg:           { task: "T1",  label: "EKG Overview" },
-    "ekg-v3":      { task: "T1",  label: "EKG Overview" },   // backward-compat alias
-    "ekg-legacy":  { task: "T1‑L", label: "EKG Legacy (multi-scale)" },
-    atlas:         { task: "",    label: "Legacy Atlas" },
-    identify:      { task: "T2",  label: "Identify" },
-    compare:       { task: "T3",  label: "Compare" },
-    explore:       { task: "T4",  label: "Explore" },
-    summarize:     { task: "",    label: "Process variants" },
+    home:      { task: "",   label: "Home" },
+    summarize: { task: "T1", label: "Lifecycle (Population)" },
+    identify:  { task: "T2", label: "Lifecycle (Detail)" },
+    compare:   { task: "T3", label: "Compare" },
+    explore:   { task: "T4", label: "Explore" },
   };
 
   const info = MAP[route.name] ?? MAP.home;
@@ -43,13 +39,9 @@ export function updateTopbar(route, store) {
   sep.style.display      = route.name === "home" ? "none" : "";
 
   let ctxText = "";
-  if (route.name === "ekg" || route.name === "ekg-v3") {
-    ctxText = "Type interaction map";
-  } else if (route.name === "ekg-legacy") {
-    const levels = { "0": "L0 Galaxy", "1": "L1 District", "2": "L2 Neighbourhood", "3": "L3 Street" };
-    ctxText = levels[route.params.level ?? "1"] ?? "Multi-scale view";
-  } else if (route.name === "atlas") {
-    ctxText = "Legacy · complete view";
+  if (route.name === "summarize") {
+    const pinned = (route.params.pinned ?? route.params.entity ?? "").split(",").filter(Boolean);
+    ctxText = pinned.length ? `${pinned.length} pinned` : "Population view";
   } else if (route.name === "identify" && !route.params.entity) {
     ctxText = "Pick entity";
   } else if (route.name === "identify" && route.params.entity) {
@@ -64,8 +56,6 @@ export function updateTopbar(route, store) {
     } else {
       ctxText = "Variants";
     }
-  } else if (route.name === "summarize") {
-    ctxText = "Process graph";
   } else if (route.name === "explore") {
     ctxText = route.params.cluster
       ? decodeURIComponent(route.params.cluster).replace("act:", "")

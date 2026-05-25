@@ -4,16 +4,16 @@ import { navigate } from "../router.js";
 import { getVariantOverview } from "../data/store.js";
 
 const PRIMARY_TASK = {
-  id: "T1", route: "ekg", label: "EKG Overview",
-  tuple: "⟨Overview, Filter, Details on Demand⟩",
-  desc: "The entity-type interaction map and event volume timeline in one place. Click a type to focus it across both panels — the schema dims non-neighbours, the timeline isolates its volume profile, and the detail panel shows top activities, entities, and structural connections. Drag the timeline to set a date filter.",
+  id: "T1", route: "summarize", label: "Lifecycle (Population)",
+  tuple: "⟨Identify, Path⟩",
+  desc: "Every event of every entity in one Canvas 2D dotted-chart: time on x, entity-type bands on y, vertical ticks where three or more entity types share an event. Click a dot to pin its full directly-follows path; shift-click to pin more. Brush the mini axis to zoom a time window, press play to advance the cursor.",
 };
 
 const SUPPORTING_TASKS = [
   {
-    id: "T2", route: "identify", label: "Identify (Lifecycle)",
+    id: "T2", route: "identify", label: "Identify (Detail)",
     tuple: "⟨Identify, Path⟩",
-    desc: "Open one entity and read its full lifecycle along the shared time axis, including bottleneck waits.",
+    desc: "Open one entity and read its full multi-band detail slice — bottleneck waits, shared-event guides, optional correlation and structural-relation overlays.",
   },
   {
     id: "T3", route: "compare", label: "Compare (Variants)",
@@ -99,7 +99,7 @@ export function renderHome(store, manifest, currentDatasetName) {
           <span class="task-card-tuple">${_esc(PRIMARY_TASK.tuple)}</span>
           <span class="task-card-title">${_esc(PRIMARY_TASK.label)}</span>
           <span class="task-card-desc">${_esc(PRIMARY_TASK.desc)}</span>
-          <span class="task-card-cta">Open EKG Overview →</span>
+          <span class="task-card-cta">Open population view →</span>
         </a>
       </section>
 
@@ -116,11 +116,6 @@ export function renderHome(store, manifest, currentDatasetName) {
               <span class="task-card-cta">Open →</span>
             </a>
           `).join("")}
-        </div>
-        <div class="home-legacy-row">
-          <a href="#/ekg-legacy" class="home-legacy-link" data-route="ekg-legacy">EKG Legacy (multi-scale L0–L3) →</a>
-          <a href="#/atlas" class="home-legacy-link" data-route="atlas">Open legacy Atlas →</a>
-          <span class="home-legacy-hint">Legacy views kept for reference. T1 is now the EKG Overview above.</span>
         </div>
       </section>
 

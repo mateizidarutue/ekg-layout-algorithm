@@ -16,18 +16,18 @@ All four task screens are fully implemented and demo-ready.
 
 | Task | Route | Screen type | Status |
 |---|---|---|---|
-| T1 Lifecycle | `#/identify` | SVG canvas | Complete |
-| T2 Variants & Comparison | `#/compare` | SVG canvas | Complete |
-| T3 Process Overview | `#/summarize` | HTML card grid | Complete |
-| T4 Shared Events | `#/explore` | HTML dashboard | Complete |
+| T1 Lifecycle (Population) | `#/summarize` | Canvas 2D + SVG overlay | Complete |
+| T2 Lifecycle (Detail)     | `#/identify`  | SVG canvas | Complete |
+| T3 Variants & Comparison  | `#/compare`   | SVG canvas | Complete |
+| T4 Shared Events          | `#/explore`   | HTML dashboard | Complete |
 
-**T1** opens any entity and renders its complete multi-entity lifecycle on a shared time axis, with DF bottleneck highlighting, shared-event guides, and an interactive cluster-activity filter.
+**T1** renders every event of every entity on a single Canvas 2D dotted-chart: time on x, entity-type bands stacked on y, vertical ticks where an event is shared across three or more entity types. Clicking a dot pins that entity and draws its complete directly-follows path as a polyline across all bands it touches; shift-click to pin more. A focus-context brush below the canvas zooms a time window, and a playback cursor fades future events as it advances. This is the only Canvas 2D screen in the viewer; everything else is SVG.
 
-**T2** reconstructs item-level traces, groups them into process variants, and shows a dominant-variant ranking alongside an activity DF graph. Compare mode places multiple entity lifelines on the same canvas with per-entity accent colours.
+**T2** opens one entity and renders its full multi-entity slice on a shared time axis, with DF bottleneck highlighting, shared-event guides, optional correlation and structural-relation overlays, and an interactive cluster-activity filter.
 
-**T3** renders a card grid of process variants derived directly from the item-level trace computation. Each card shows the activity sequence, case count, proportion bar, member and event statistics, and a date range. Clicking a card navigates to T2 with that variant pre-selected. This replaces the earlier label-propagation community clustering approach.
+**T3** reconstructs item-level traces, groups them into process variants, and shows a dominant-variant ranking alongside an activity DF graph. Compare mode places multiple entity lifelines on the same canvas with per-entity accent colours.
 
-**T4** lists shared-event hotspots (activities that appear in events correlated to 3 or more entities simultaneously) and drills into an analytics dashboard showing entity-count distribution, type-pair co-participation, and most-active entities for each hotspot.
+**T4** lists shared-event hotspots (activities that appear in events correlated to three or more entities simultaneously) and drills into an analytics dashboard showing entity-count distribution, type-pair co-participation, and most-active entities for each hotspot.
 
 ## Four-Task Screen Architecture
 
@@ -35,10 +35,12 @@ The viewer organises analysis around four task cards derived from Munzner (2014)
 
 | Task | Route | Munzner tuple | Purpose |
 |---|---|---|---|
-| T1 Lifecycle | `#/identify` | ⟨Identify, Path⟩ | Open one entity and read its full lifecycle on the shared time axis, including bottleneck waits. |
-| T2 Variants & Comparison | `#/compare` | ⟨Compare, Paths⟩ | Group entities by behaviour into variants, then place multiple lifelines on the same canvas. |
-| T3 Process Overview | `#/summarize` | ⟨Summarize, Topology⟩ | See how the dataset partitions into process variants; click any card to inspect that variant in detail. |
-| T4 Shared Events | `#/explore` | ⟨Explore, Features⟩ | Find shared events where three or more entity lifecycles intersect. |
+| T1 Lifecycle (Population) | `#/summarize` | ⟨Identify, Path⟩ | Read every entity's lifecycle in one population dotted-chart; pin individual entities to surface their directly-follows path on the canvas. |
+| T2 Lifecycle (Detail)     | `#/identify`  | ⟨Identify, Path⟩ | Open one entity and read its full multi-band detail slice including bottleneck waits. |
+| T3 Variants & Comparison  | `#/compare`   | ⟨Compare, Paths⟩ | Group entities by behaviour into variants, then place multiple lifelines on the same canvas. |
+| T4 Shared Events          | `#/explore`   | ⟨Explore, Features⟩ | Find shared events where three or more entity lifecycles intersect. |
+
+T1 and T2 split a single Munzner tuple by scale: T1 is the population view (every entity at once, dot-density), T2 is the single-entity drill-down (full detail layout with edges). T1 is the analyst's entry point; T2 is invoked from T1's inspector for any pinned entity.
 
 ### Hash-based navigation
 
@@ -46,11 +48,12 @@ The viewer uses hash-based routing. Every view state is a stable, shareable URL:
 
 ```
 http://localhost:8000/viewer/#/home
-http://localhost:8000/viewer/#/identify?entity=<id>
-http://localhost:8000/viewer/#/compare?entities=<id1>,<id2>
-http://localhost:8000/viewer/#/compare?variant=<sequence-key>
-http://localhost:8000/viewer/#/summarize
-http://localhost:8000/viewer/#/explore?cluster=act:<activity>
+http://localhost:8000/viewer/#/summarize                                  (T1 population view)
+http://localhost:8000/viewer/#/summarize?pinned=<id1>,<id2>&t0=<ms>&t1=<ms>&cursorT=<ms>&q=<query>
+http://localhost:8000/viewer/#/identify?entity=<id>                       (T2 detail view)
+http://localhost:8000/viewer/#/compare?entities=<id1>,<id2>               (T3 compare)
+http://localhost:8000/viewer/#/compare?variant=<sequence-key>             (T3 variants)
+http://localhost:8000/viewer/#/explore?cluster=act:<activity>             (T4 hotspot)
 ```
 
 Opening the viewer at `http://localhost:8000/viewer/` redirects to `#/home`, where the four task cards are shown.
@@ -80,7 +83,7 @@ The current implementation aligns with that goal in four ways:
    Events, entities, correlations, directly-follows edges, and structural entity-to-entity relations are all preserved.
 
 2. It separates analysis into four coordinated screens.
-   T1 shows a local multi-entity slice around one selected entity. T2 focuses on dominant item-level behaviour and side-by-side comparison. T3 shows the full variant distribution as an interactive card grid. T4 surfaces synchronisation hotspots where three or more entity types intersect.
+   T1 shows every event of every entity in one population dotted-chart, with pinning to surface a single entity's df-path in context. T2 drills into one entity's full multi-band detail slice. T3 focuses on dominant item-level behaviour and side-by-side comparison. T4 surfaces synchronisation hotspots where three or more entity types intersect.
 
 3. It emphasizes the layout requirements from the thesis.
    The detail view uses one horizontal time axis, one band per entity type, one lane per entity instance, explicit shared-event guides, clustered shared-event markers at the top, and optional DF and structural relation layers.
@@ -90,12 +93,12 @@ The current implementation aligns with that goal in four ways:
 
 In practical terms, the prototype supports:
 
-- locating and opening an arbitrary entity,
-- inspecting its local multi-entity context,
-- seeing where events are shared across entity timelines,
-- browsing the full process-variant distribution as ranked cards,
+- reading the whole dataset at once as a Canvas 2D population view,
+- pinning an entity to surface its complete directly-follows path across all bands,
+- zooming a time window via a focus-context brush, and playing the timeline back,
+- drilling into a single entity's multi-band detail slice,
 - comparing item traces that follow the same or different variants,
-- drilling from the variant overview into a detail comparison view,
+- browsing the full process-variant distribution as ranked cards,
 - exploring shared-event hotspots and their entity-type breakdown.
 
 ## Supported Datasets
@@ -147,25 +150,28 @@ bep/
     |-- index.html
     |-- style.css
     `-- src/
-        |-- main.js            <- central route dispatcher
-        |-- router.js          <- hash-based SPA router
+        |-- main.js                 <- central route dispatcher
+        |-- router.js               <- hash-based SPA router
         |-- data/
-        |   |-- entityTypes.js <- dataset-agnostic entity-type registry
+        |   |-- entityTypes.js      <- dataset-agnostic entity-type registry
         |   |-- loader.js
-        |   `-- store.js       <- store build, variant analytics, shared-event hotspot exports
+        |   `-- store.js            <- store build, getEkgView, variant analytics, hotspots
         |-- layout/
-        |   |-- detailLayout.js
-        |   `-- overviewLayout.js
+        |   |-- detailLayout.js     <- T2 / T3 compare detail geometry
+        |   |-- overviewLayout.js   <- T3 variant card grid + activity DF graph
+        |   `-- summarizeLayout.js  <- T1 population: bands, dots, shared ticks (pure)
         |-- render/
-        |   |-- detailRender.js
-        |   |-- overviewRender.js
+        |   |-- detailRender.js     <- T2 / T3 compare SVG renderer
+        |   |-- overviewRender.js   <- T3 variant SVG renderer
+        |   |-- exploreClusterRender.js
+        |   |-- summarizeRender.js  <- T1 Canvas 2D dot pass + SVG overlay
         |   `-- shared.js
         `-- screens/
-            |-- home.js        <- T0 home screen with task cards
-            |-- identify.js    <- T1 entity picker
-            |-- explore.js     <- T4 shared-events list and cluster detail dashboard
-            |-- summarize.js   <- T3 process variant card grid
-            `-- sidebar.js     <- route-aware sidebar / topbar updater
+            |-- home.js             <- home screen with task cards
+            |-- summarize.js        <- T1 population view (Canvas 2D screen module)
+            |-- identify.js         <- T2 entity picker (the detail render flows through main.js)
+            |-- explore.js          <- T4 shared-events list and cluster detail dashboard
+            `-- sidebar.js          <- route-aware sidebar / topbar updater
 ```
 
 Read this structure from top to bottom:
@@ -254,10 +260,10 @@ You can also deep-link into a specific dataset and route:
 
 ```
 http://localhost:8000/viewer/#/home
-http://localhost:8000/viewer/#/identify?entity=<id>
-http://localhost:8000/viewer/#/compare?entities=<id1>,<id2>
-http://localhost:8000/viewer/#/summarize
-http://localhost:8000/viewer/#/explore
+http://localhost:8000/viewer/#/summarize                       (T1 population)
+http://localhost:8000/viewer/#/identify?entity=<id>            (T2 detail)
+http://localhost:8000/viewer/#/compare?entities=<id1>,<id2>    (T3 compare)
+http://localhost:8000/viewer/#/explore                         (T4 hotspots)
 ```
 
 ## Fastest Evaluation Path
@@ -358,7 +364,7 @@ At load time it:
 2. builds an in-memory store,
 3. derives analytical structures,
 4. computes layout geometry,
-5. renders SVG (T1, T2) or HTML dashboards (T3, T4) with interactive sidebar panels.
+5. renders Canvas 2D (T1) or SVG (T2, T3) or HTML dashboards (T4) with interactive sidebar panels.
 
 The main analytical frontend files are:
 
@@ -368,9 +374,24 @@ The main analytical frontend files are:
 
 ## Prototype Views
 
-### T1 – Lifecycle (`#/identify`)
+### T1 – Lifecycle (Population) (`#/summarize`)
 
-Opens one entity and renders its full multi-entity detail slice on a shared time axis.
+The analyst's entry point. Renders the entire dataset as a single Canvas 2D dotted-chart: one dot per (entity, event), time on x, entity-type bands stacked on y. Vertical ticks mark shared events that touch three or more entity types.
+
+- **Pinning.** Click a dot to pin its entity — the entity's complete directly-follows path is drawn as a polyline across all bands it touches. Shift-click to pin more entities for light comparison; the deep comparison workflow still lives in T3.
+- **Time brush.** A density strip below the canvas exposes a `d3.brushX`; dragging it zooms the visible time window. The brush reuses `getEkgView` time bins for the density histogram.
+- **Playback cursor.** A play button advances a vertical cursor through time at 1×, 4×, 16×, or 64× speed (a full timeline plays in 30 seconds at 1×). Future events fade out; pinned df-paths grow as the cursor passes them.
+- **Inspector.** Click a pinned dot or a shared-event tick to open a right-edge inspector with the entity's full event sequence, sync degree per event, and a "Open T2 detail" jump.
+- **Search.** Live search by entity id or label highlights matching dots and dims the rest.
+- **URL state.** Pinned ids, time window, cursor position, and search query are all serialised into the hash, so any view state is shareable.
+- **Sidebar.** Pinned entities list, entity-type band visibility toggles, shared-tick toggle, fade-future toggle, plus the dataset-wide activity allowlist.
+- **Keyboard.** `Space` toggles play, `←/→` scrub the cursor (Shift = 10%), `Esc` clears pins, `/` focuses search, `0` resets the window and cursor.
+
+This is the only Canvas 2D screen in the viewer. All other screens are SVG. The rationale: at the population scale a typical viewer bundle is on the order of 10⁴–10⁵ dots, and a per-dot SVG node tax (~1 KB live size) makes that intractable.
+
+### T2 – Lifecycle (Detail) (`#/identify`)
+
+Drilled-in detail for one entity. Renders its full multi-entity detail slice on a shared time axis.
 
 - Anchor entity's first and last events are marked with START / END glyphs.
 - Bottleneck DF edges are highlighted in amber.
@@ -382,7 +403,9 @@ Depending on the anchor type, the scope is specialised:
 - item/book anchor → overlap-only item focus,
 - generic anchor → local neighbourhood.
 
-### T2 – Variants & Comparison (`#/compare`)
+T1 → T2 handoff: click any pinned dot in the T1 inspector and choose "Open T2 detail" to land here with the entity preselected.
+
+### T3 – Variants & Comparison (`#/compare`)
 
 Two modes are available in this screen:
 
@@ -396,19 +419,6 @@ Two modes are available in this screen:
 - Multiple entity lifelines are shown on the same canvas simultaneously.
 - Each entity gets an accent colour in the compare strip; its lane is highlighted on the canvas.
 - Entities can be added (by clicking any entity in the sidebar list) or removed via the strip's × button.
-
-### T3 – Process Overview (`#/summarize`)
-
-Variant-based overview of the whole dataset, rendered as a scrollable HTML card grid.
-
-- Each card represents one unique activity sequence (process variant).
-- Cards show: variant rank, activity sequence, case count, proportion bar relative to the dominant variant, member count, event total, average duration, and date range.
-- Cards are sorted by frequency; the dominant variant is visually distinguished.
-- Clicking any card navigates directly to T2 compare mode with that variant pre-selected.
-- The sidebar shows overall process statistics: variant count, total cases, dominant variant share, and average sequence length.
-- The activity filter in the sidebar applies to variant computation, narrowing both the card grid and statistics.
-
-This replaces the earlier label-propagation community clustering, which produced 80+ indistinguishable communities for BPIC19. The variant-based grouping uses the same trace reconstruction as T2, making T3 and T2 directly consistent.
 
 ### T4 – Shared Events (`#/explore`)
 
@@ -535,8 +545,10 @@ This repository is a full prototype pipeline for thesis-driven EKG analysis:
 - the browser reconstructs analytical structure and computes the layouts,
 - four task-aligned screens cover Lifecycle (T1), Variants & Comparison (T2), Process Overview (T3), and Shared Events (T4).
 
-**T1 and T2** render as interactive SVG canvases using the custom typed-band detail layout: entity types as horizontal bands, individual lifecycles as lanes, a shared time axis, bottleneck DF highlighting, shared-event guides, and optional correlation and structural relation layers.
+**T1** renders as a single Canvas 2D dotted-chart with an SVG overlay for axis, headers, pinned df-paths, and the playback cursor. One dot per (entity, event), bands per entity type, vertical ticks on three-or-more shared events. The only Canvas 2D screen in the viewer.
 
-**T3** renders as a scrollable HTML card grid of process variants, each linking back to T2 for detailed comparison. This replaces the earlier label-propagation community clustering, which produced too many indistinguishable groups for large datasets.
+**T2 and T3 compare mode** render as interactive SVG canvases using the custom typed-band detail layout: entity types as horizontal bands, individual lifecycles as lanes, a shared time axis, bottleneck DF highlighting, shared-event guides, and optional correlation and structural relation layers.
+
+**T3 variants mode** renders as a scrollable SVG variant-ranking with a lower activity DF graph.
 
 **T4** renders as a scrollable HTML analytics dashboard showing shared-event hotspots filtered to events with three or more entity types, surfacing genuine multi-entity synchronisation rather than trivial two-entity correlations.

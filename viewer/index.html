@@ -31,16 +31,34 @@
         <div class="ctrl-hint">Scroll vertically like a web page · Use Shift+wheel or the bottom scrollbar for wide views · Top: F or 0</div>
       </div>
 
-      <!-- Overview/community summary (summarize route) -->
-      <div class="ctrl-group summarize-only" id="overview-summary-panel">
-        <div class="ctrl-label section-label" id="overview-summary-title">Overview Summary</div>
-        <div id="overview-summary-content"></div>
+      <!-- T1 Population overview (summarize route) -->
+      <div class="ctrl-group summarize-only" id="t1-overview-panel">
+        <div class="ctrl-label section-label" id="t1-overview-title">Population overview</div>
+        <div id="t1-overview-content"></div>
       </div>
 
-      <!-- EKG Atlas summary (atlas route) -->
-      <div class="ctrl-group atlas-only" id="atlas-summary-panel">
-        <div class="ctrl-label section-label" id="atlas-summary-title">EKG Atlas</div>
-        <div id="atlas-summary-content"></div>
+      <!-- T1 Pinned entities (summarize route) -->
+      <div class="ctrl-group summarize-only" id="t1-pinned-panel">
+        <div class="ctrl-label section-label">Pinned entities</div>
+        <div id="t1-pinned-list" class="t1-pinned-list"></div>
+      </div>
+
+      <!-- T1 Visible bands (summarize route) -->
+      <div class="ctrl-group summarize-only" id="t1-band-panel">
+        <div class="ctrl-label section-label">Visible entity types</div>
+        <div id="t1-band-list" class="t1-band-list"></div>
+      </div>
+
+      <!-- T1 Display options (summarize route) -->
+      <div class="ctrl-group summarize-only" id="t1-options-panel">
+        <div class="ctrl-label section-label">Display options</div>
+        <label class="toggle-row">
+          <input id="t1-toggle-fade-future" type="checkbox" checked />
+          Fade events after cursor
+        </label>
+        <div class="ctrl-hint" style="margin-top:6px;line-height:1.5">
+          Shared-event dots are drawn 40% larger; hover any dot to see its sync degree.
+        </div>
       </div>
 
       <!-- Detail filters (identify + compare routes) -->
