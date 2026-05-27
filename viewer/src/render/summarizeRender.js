@@ -2,9 +2,10 @@
 
 // Renderer for T1 Lifecycle (Population). Two passes:
 //   • drawCanvasPass()  — every dot, hot path, runs on every cursor move.
-//   • drawOverlayPass() — band headers, axis, shared-event ticks, pinned
-//                          df-paths, hover halo, playback cursor. Cheap; only
-//                          called when layout/pin/hover/cursor changes.
+//   • drawOverlayPass() — band headers, axis, activity-row labels, selection
+//                          polylines, hover halo, selected-event halo, cursor.
+//                          Cheap; only called when layout / selection / hover /
+//                          cursor-tick changes.
 
 const TAU = Math.PI * 2;
 
@@ -27,21 +28,29 @@ export function drawCanvasPass(canvas, layout, state) {
 
   const dots = layout.dotPositions;
   const n = dots.length;
-  const cursorT = state.cursorT;
-  const fade = state.fadeFuture !== false;
   const searchActive = state.searchQuery && state.searchMatchEntityIds && state.searchMatchEntityIds.size > 0;
-  const pinned = state.pinnedEntityIds;
-  const hasPinned = pinned && pinned.size > 0;
+  const selectionActive = !!(state.selection && state.selection.highlightedEventIds && state.selection.highlightedEventIds.size > 0);
+  const highlightedEvents = selectionActive ? state.selection.highlightedEventIds : null;
+
+  // Alpha layering:
+  //   1. base              → 0.78 when no selection, else (1.0 highlighted | 0.05 dimmed)
+  //   2. search multiplier → ×0.20 if entity not in search matches
+  const SEARCH_DIM_FACTOR = 0.20;
+  const SELECTION_DIM = 0.05;          // near-invisible; selection takes the stage
+  const SELECTION_HIGHLIGHT = 1.0;
+  const BASE = 0.78;
 
   for (let i = 0; i < n; i++) {
     const d = dots[i];
     let alpha;
-    if (fade && d.t > cursorT) alpha = 0.10;
-    else alpha = 0.78;
-    if (searchActive && !state.searchMatchEntityIds.has(d.entityId)) alpha *= 0.18;
-    if (hasPinned && pinned.has(d.entityId)) alpha = Math.min(1, alpha + 0.15);
+    if (selectionActive) {
+      alpha = highlightedEvents.has(String(d.eventId)) ? SELECTION_HIGHLIGHT : SELECTION_DIM;
+    } else {
+      alpha = BASE;
+    }
+    if (searchActive && !state.searchMatchEntityIds.has(d.entityId)) alpha *= SEARCH_DIM_FACTOR;
 
-    ctx.globalAlpha = alpha;
+    ctx.globalAlpha = Math.min(1, alpha);
     ctx.fillStyle = d.color;
     ctx.beginPath();
     ctx.arc(d.x, d.y, d.radius, 0, TAU);
@@ -59,13 +68,11 @@ export function drawOverlayPass(svg, layout, state, store, callbacks) {
   s.selectAll("*").remove();
 
   _drawBands(s, layout);
+  _drawActivityLabels(s, layout);
   _drawAxis(s, layout);
-  // Shared-event ticks deliberately omitted from the overlay: on dense bundles
-  // they collapse into vertical bars. Shared-ness is conveyed by the
-  // per-dot 1.4× radius bump and the hover tooltip's "Shared event" line.
-  if (state.pinnedEntityIds?.size) _drawPinnedPaths(s, layout, state, store, callbacks);
+  if (state.selection) _drawSelectionPolylines(s, layout, state, store, callbacks);
+  if (state.selection) _drawSelectionHalo(s, layout, state);
   if (state.hoveredDotIndex != null) _drawHoverHalo(s, layout, state);
-  _drawCursor(s, layout, state, callbacks);
 }
 
 function _drawBands(s, layout) {
@@ -87,14 +94,33 @@ function _drawBands(s, layout) {
     row.append("text")
       .attr("class", "t1-band-count")
       .attr("x", 12).attr("y", 28)
-      .text(`${b.entityCount} entities`);
+      .text(`${b.entityCount} entities · ${b.activities.length} activities`);
 
-    // Faint band horizontal guide across the canvas.
+    // Band divider line across the data area.
     s.append("line")
       .attr("class", "t1-band-divider")
       .attr("x1", layout.innerLeft).attr("x2", layout.innerRight)
       .attr("y1", b.y1 + 1).attr("y2", b.y1 + 1)
       .attr("stroke", "#e2e8f0").attr("stroke-width", 1);
+  });
+}
+
+function _drawActivityLabels(s, layout) {
+  const g = s.append("g").attr("class", "t1-activity-labels");
+  layout.activityLabels.forEach(a => {
+    // Faint row guide so labels line up visually with their dot row.
+    s.append("line")
+      .attr("class", "t1-activity-guide")
+      .attr("x1", layout.innerLeft).attr("x2", layout.innerRight)
+      .attr("y1", a.y).attr("y2", a.y)
+      .attr("stroke", a.inSelection ? "#e2e8f0" : "#f5f5f7")
+      .attr("stroke-width", 1);
+    const text = g.append("text")
+      .attr("class", "t1-activity-label" + (a.inSelection === false && layout.hasSelection ? " is-dim" : ""))
+      .attr("x", a.x).attr("y", a.y + 3)
+      .attr("text-anchor", "end")
+      .text(a.label);
+    text.append("title").text(`${a.full} · ${a.count} events`);
   });
 }
 
@@ -115,41 +141,68 @@ function _drawAxis(s, layout) {
   });
 }
 
-function _drawPinnedPaths(s, layout, state, store, callbacks) {
-  const g = s.append("g").attr("class", "t1-pinned-paths");
-  const cursorT = state.cursorT;
-  state.pinnedEntityIds.forEach(entityId => {
-    const evMap = layout.eventPosByEntity.get(entityId);
-    if (!evMap) return;
+function _drawSelectionPolylines(s, layout, state, store, callbacks) {
+  const sel = state.selection;
+  if (!sel?.highlightedEntityIds?.size) return;
+  const g = s.append("g").attr("class", "t1-selection-paths");
+  const primaryId = sel.primaryEntityId;
+
+  sel.highlightedEntityIds.forEach(entityId => {
+    const ordered = layout.eventPosByEntity.get(entityId);
+    if (!ordered || ordered.length === 0) return;
     const entity = store?.entityById?.[entityId];
     const typeColor = layout.bands.find(b => b.type === entity?.primary_type)?.color ?? "#0f172a";
-    const edges = store?.dfByEntityId?.[entityId] ?? [];
-    const pathG = g.append("g")
-      .attr("class", "t1-pinned-path")
-      .attr("data-entity-id", entityId);
-    edges.forEach(edge => {
-      const aId = String(edge.source_event_id ?? edge.source);
-      const bId = String(edge.target_event_id ?? edge.target);
-      const a = evMap.get(aId);
-      const b = evMap.get(bId);
-      if (!a || !b) return;
-      const future = a.t > cursorT || b.t > cursorT;
-      pathG.append("line")
-        .attr("class", "t1-pinned-edge")
-        .attr("x1", a.x).attr("y1", a.y).attr("x2", b.x).attr("y2", b.y)
-        .attr("stroke", typeColor).attr("stroke-width", 1.8)
-        .attr("stroke-opacity", future ? 0.18 : 0.85)
-        .attr("stroke-linecap", "round");
+    const isPrimary = entityId === primaryId;
+    const stroke = isPrimary ? 2.2 : 1.4;
+    const opacity = isPrimary ? 1.0 : 0.85;
+
+    // Build the polyline points string in time order. Discontinuities are not
+    // a concern because eventPosByEntity already filters to in-window events.
+    const pts = ordered.map(p => `${p.x},${p.y}`).join(" ");
+    if (ordered.length >= 2) {
+      g.append("polyline")
+        .attr("class", "t1-selection-line" + (isPrimary ? " t1-selection-line-primary" : ""))
+        .attr("data-entity-id", entityId)
+        .attr("points", pts)
+        .attr("fill", "none")
+        .attr("stroke", typeColor)
+        .attr("stroke-width", stroke)
+        .attr("stroke-opacity", opacity)
+        .attr("stroke-linecap", "round")
+        .attr("stroke-linejoin", "round")
+        .style("cursor", "pointer")
+        .on("click", () => callbacks?.onSelectionLineClick?.(entityId));
+    }
+    // Small ring markers at each event of the highlighted entity (subtle).
+    ordered.forEach(p => {
+      g.append("circle")
+        .attr("cx", p.x).attr("cy", p.y)
+        .attr("r", isPrimary ? 3.4 : 2.8)
+        .attr("fill", "none")
+        .attr("stroke", typeColor)
+        .attr("stroke-width", isPrimary ? 1.3 : 1.0)
+        .attr("opacity", opacity);
     });
-    // Pinned-entity dot ring markers
-    evMap.forEach((p) => {
-      pathG.append("circle")
-        .attr("cx", p.x).attr("cy", p.y).attr("r", 3.6)
-        .attr("fill", "none").attr("stroke", typeColor).attr("stroke-width", 1.4)
-        .attr("opacity", p.t > cursorT ? 0.3 : 0.95);
-    });
-    pathG.on("click", () => callbacks?.onPinnedPathClick?.(entityId));
   });
+}
+
+function _drawSelectionHalo(s, layout, state) {
+  const sel = state.selection;
+  if (!sel?.eventId) return;
+  // Find the dot for the selected event in the primary entity's band.
+  // If the dot isn't in the visible time window, skip the halo (the polyline
+  // will still convey direction).
+  const dots = layout.dotPositions;
+  for (let i = 0; i < dots.length; i++) {
+    const d = dots[i];
+    if (String(d.eventId) === String(sel.eventId) && d.entityId === sel.primaryEntityId) {
+      s.append("circle")
+        .attr("class", "t1-selection-halo")
+        .attr("cx", d.x).attr("cy", d.y).attr("r", d.radius + 3)
+        .attr("fill", "none").attr("stroke", "#0f172a").attr("stroke-width", 1.5);
+      return;
+    }
+  }
 }
 
 function _drawHoverHalo(s, layout, state) {
@@ -161,26 +214,3 @@ function _drawHoverHalo(s, layout, state) {
     .attr("fill", "none").attr("stroke", "#0f172a").attr("stroke-width", 1.5);
 }
 
-function _drawCursor(s, layout, state, callbacks) {
-  const clampedT = Math.max(layout.timeWindow.t0, Math.min(layout.timeWindow.t1, state.cursorT));
-  const cx = layout.xScale(clampedT);
-  const g = s.append("g").attr("class", "t1-cursor");
-  g.append("line")
-    .attr("x1", cx).attr("x2", cx)
-    .attr("y1", layout.innerTop - 10).attr("y2", layout.innerBottom + 2)
-    .attr("stroke", "#dc2626").attr("stroke-width", 1.2).attr("stroke-opacity", 0.85);
-  // Wider invisible hit zone so the handle is grabbable.
-  g.append("rect")
-    .attr("class", "t1-cursor-hit")
-    .attr("x", cx - 9).attr("y", layout.innerTop - 16)
-    .attr("width", 18).attr("height", 16)
-    .attr("fill", "transparent")
-    .style("cursor", "ew-resize")
-    .on("mousedown", ev => callbacks?.onCursorDragStart?.(ev));
-  g.append("polygon")
-    .attr("class", "t1-cursor-handle")
-    .attr("points", `${cx - 6},${layout.innerTop - 14} ${cx + 6},${layout.innerTop - 14} ${cx},${layout.innerTop - 4}`)
-    .attr("fill", "#dc2626")
-    .style("cursor", "ew-resize")
-    .on("mousedown", ev => callbacks?.onCursorDragStart?.(ev));
-}

@@ -37,10 +37,10 @@
         <div id="t1-overview-content"></div>
       </div>
 
-      <!-- T1 Pinned entities (summarize route) -->
-      <div class="ctrl-group summarize-only" id="t1-pinned-panel">
-        <div class="ctrl-label section-label">Pinned entities</div>
-        <div id="t1-pinned-list" class="t1-pinned-list"></div>
+      <!-- T1 Current selection (summarize route) -->
+      <div class="ctrl-group summarize-only" id="t1-selection-panel">
+        <div class="ctrl-label section-label">Current selection</div>
+        <div id="t1-selection-summary" class="t1-selection-panel"></div>
       </div>
 
       <!-- T1 Visible bands (summarize route) -->
@@ -49,14 +49,10 @@
         <div id="t1-band-list" class="t1-band-list"></div>
       </div>
 
-      <!-- T1 Display options (summarize route) -->
+      <!-- T1 Display hints (summarize route) -->
       <div class="ctrl-group summarize-only" id="t1-options-panel">
-        <div class="ctrl-label section-label">Display options</div>
-        <label class="toggle-row">
-          <input id="t1-toggle-fade-future" type="checkbox" checked />
-          Fade events after cursor
-        </label>
-        <div class="ctrl-hint" style="margin-top:6px;line-height:1.5">
+        <div class="ctrl-label section-label">Display</div>
+        <div class="ctrl-hint" style="line-height:1.5">
           Shared-event dots are drawn 40% larger; hover any dot to see its sync degree.
         </div>
       </div>
@@ -230,6 +226,13 @@
 
         <!-- DOM screen host (home, explore list) -->
         <div id="screen-host" class="screen-host hidden"></div>
+
+        <!-- Active time-window chip (T2 / T3-compare; shown only while window is set) -->
+        <div id="time-window-chip" class="time-window-chip hidden" aria-live="polite">
+          <span class="time-window-chip-label">Window</span>
+          <span class="time-window-chip-range" id="time-window-chip-range">—</span>
+          <button type="button" class="time-window-chip-reset" id="time-window-chip-reset" aria-label="Reset time window">×</button>
+        </div>
 
         <!-- Tooltip -->
         <div id="tooltip" class="tooltip"></div>

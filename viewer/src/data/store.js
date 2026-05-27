@@ -208,6 +208,100 @@ function _buildEntityIdsByType(entities) {
   }, {});
 }
 
+// ── Co-temporal event merge ─────────────────────────────────────────────────
+//
+// Some datasets (notably BPIC19) emit one event per child entity sharing the
+// same parent timestamp and activity. E.g., a PurchaseOrder with 7 line items
+// produces 7 separate "Create Purchase Order Item" events at the same instant,
+// each correlated to the parent PO and one item. From a logical-process
+// perspective they're one event whose memberships span the parent + every
+// child involved.
+//
+// We collapse these at buildStore time using the key
+//   (date_ms, activity, sorted set of case-type entity ids)
+// so two genuinely independent processes that happened to fire the same
+// activity at the same instant stay separate as long as they touch different
+// case-type entities.
+//
+// The merge picks the lexicographically-smallest event_id as canonical;
+// other group members get rewired to it via mergeMap. Corr edges and DF
+// edges are rewritten to canonical IDs (dedup + drop self-loops). Memberships
+// are recomputed from the rewritten corr in the second _buildContextMaps
+// pass, so the canonical event ends up with the union of all members.
+function _computeEventMerge(events, caseType) {
+  const groups = new Map();
+  events.forEach(event => {
+    const t = event.date?.getTime?.();
+    if (!Number.isFinite(t)) {
+      // Events with invalid dates can't be merged sensibly; keep them unique.
+      groups.set(`UNIQ|${event.event_id}`, [event]);
+      return;
+    }
+    const caseIds = (event.entity_ids_by_type?.[caseType] ?? []).slice().sort();
+    const caseKey = caseIds.length ? caseIds.join(",") : `_nocase_${event.event_id}`;
+    const key = `${t}|${event.activity ?? ""}|${caseKey}`;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(event);
+  });
+
+  const mergeMap = new Map();
+  const canonical = new Set();
+  const mergedSources = new Map();
+  let mergedAny = false;
+
+  groups.forEach(group => {
+    if (group.length === 1) {
+      mergeMap.set(group[0].event_id, group[0].event_id);
+      canonical.add(group[0].event_id);
+      return;
+    }
+    mergedAny = true;
+    const sorted = [...group].sort((a, b) => String(a.event_id).localeCompare(String(b.event_id)));
+    const canon = sorted[0];
+    canonical.add(canon.event_id);
+    const sources = [];
+    sorted.forEach(ev => {
+      mergeMap.set(ev.event_id, canon.event_id);
+      sources.push(ev.event_id);
+    });
+    mergedSources.set(canon.event_id, sources);
+  });
+
+  return { mergeMap, canonical, mergedSources, mergedAny };
+}
+
+function _applyEventMergeToCorr(corr, merge) {
+  const seen = new Set();
+  const out = [];
+  corr.forEach(edge => {
+    const canonId = merge.mergeMap.get(edge.event_id) ?? edge.event_id;
+    const k = `${canonId}|${edge.entity_id}`;
+    if (seen.has(k)) return;
+    seen.add(k);
+    out.push({ ...edge, event_id: canonId });
+  });
+  return out;
+}
+
+function _applyEventMergeToDf(df, merge) {
+  const seen = new Set();
+  const out = [];
+  df.forEach(edge => {
+    const srcCanon = merge.mergeMap.get(edge.source_event_id) ?? edge.source_event_id;
+    const tgtCanon = merge.mergeMap.get(edge.target_event_id) ?? edge.target_event_id;
+    if (srcCanon === tgtCanon) return; // self-loop after merge
+    const k = `${srcCanon}|${tgtCanon}|${edge.entity_id ?? ""}`;
+    if (seen.has(k)) return;
+    seen.add(k);
+    out.push({
+      ...edge,
+      source_event_id: srcCanon, source: srcCanon,
+      target_event_id: tgtCanon, target: tgtCanon,
+    });
+  });
+  return out;
+}
+
 function _detectCaseItemLens(store) {
   const relationCandidates = (store.relations ?? []).filter(edge => edge.relation_type === "HAS_ITEM");
   if (relationCandidates.length) {
@@ -282,24 +376,60 @@ function _buildCaseLens(store) {
 
 export function buildStore(bundle) {
   const entities = (bundle.entities ?? []).map(_normalizeEntity);
-  const events = (bundle.events ?? []).map(_normalizeEvent);
+  let events = (bundle.events ?? []).map(_normalizeEvent);
   const entityIdsByType = _buildEntityIdsByType(entities);
   const { eventById, entityById } = {
     eventById: Object.fromEntries(events.map(event => [event.event_id, event])),
     entityById: Object.fromEntries(entities.map(entity => [entity.entity_id, entity])),
   };
 
-  const corr = (bundle.corr ?? [])
+  let corr = (bundle.corr ?? [])
     .map(raw => _normalizeCorr(raw, entityById))
     .filter(edge => eventById[edge.event_id] && entityById[edge.entity_id]);
-  const maps = _buildContextMaps(events, corr, entities);
+  let maps = _buildContextMaps(events, corr, entities);
   const relations = (bundle.relations ?? [])
     .map(raw => _normalizeRelation(raw, maps.entityById))
     .filter(edge => maps.entityById[edge.source_entity_id] && maps.entityById[edge.target_entity_id]);
   const relationsByEntityId = _buildRelationsByEntity(relations);
-  const df = (bundle.df ?? [])
+  let df = (bundle.df ?? [])
     .map(raw => _normalizeDf(raw, maps.corrByEventId, maps.entityById))
     .filter(edge => edge.entity_id && maps.eventById[edge.source] && maps.eventById[edge.target] && maps.entityById[edge.entity_id]);
+
+  // ── Co-temporal event merge ────────────────────────────────────────────
+  // See _computeEventMerge above. Needs caseType to build the merge key, so
+  // detect it from the raw relations / df / entity counts here (the lens
+  // detection only depends on those, not on the case map we haven't built
+  // yet). If a merge happens we rewrite corr/df, reset memberships on the
+  // canonical events, then rebuild context maps so every downstream map is
+  // already consistent.
+  const { caseType: detectedCaseType } = _detectCaseItemLens({
+    relations,
+    df,
+    entityIdsByType,
+  });
+  const merge = _computeEventMerge(events, detectedCaseType);
+  if (merge.mergedAny) {
+    corr = _applyEventMergeToCorr(corr, merge);
+    df = _applyEventMergeToDf(df, merge);
+    // Drop non-canonical events; reset the canonical ones so the second
+    // _buildContextMaps pass repopulates memberships from the rewritten corr.
+    events = events.filter(ev => merge.canonical.has(ev.event_id));
+    events.forEach(ev => {
+      const sources = merge.mergedSources.get(ev.event_id);
+      if (sources && sources.length > 1) {
+        ev.mergedFromEventIds = sources;
+        ev.mergedEventCount = sources.length;
+      }
+      ev.memberships = [];
+      ev.entity_ids = [];
+      ev.entity_ids_by_type = {};
+    });
+    // Replace eventById with the deduped set so the rebuild sees fresh data.
+    Object.keys(maps.eventById).forEach(k => { delete maps.eventById[k]; });
+    events.forEach(ev => { maps.eventById[ev.event_id] = ev; });
+    maps = _buildContextMaps(events, corr, entities);
+  }
+
   const dfByEntityId = _buildDfByEntity(df);
 
   events.forEach(event => {
@@ -407,6 +537,13 @@ export function getDetailGraph(options = {}) {
   const maxEntitiesPerType = Number.isFinite(options.maxEntitiesPerType)
     ? Math.max(1, options.maxEntitiesPerType)
     : Number.POSITIVE_INFINITY;
+  // restrictedItemIds: when set, only items in this set are shown in the
+  // item-type band. Used by the variant-driven compare view to scope the
+  // chart to the items that actually belong to the selected variant, instead
+  // of bleeding every item of every selected parent into the view.
+  const restrictedItemIds = options.restrictedItemIds?.length
+    ? new Set(options.restrictedItemIds.map(String))
+    : null;
   const compareEntityIds = _resolveCompareEntityIds(anchorEntity, options.compareEntityIds ?? [], options.compareMode, maxEntitiesPerType);
   const anchorSet = new Set([anchorEntityId, ...compareEntityIds]);
   const filteredSeedEvents = [...anchorSet].flatMap(entityId => _filterEvents(_store.eventsByEntityId[entityId] ?? [], options));
@@ -437,6 +574,11 @@ export function getDetailGraph(options = {}) {
   contextEntityIds.forEach(entityId => {
     const entity = _store.entityById[entityId];
     if (!entity || !enabledTypeSet.has(entity.primary_type)) return;
+    // Item-type restriction: when the caller (e.g., the variant-driven
+    // compare flow) supplies an explicit list of item ids, drop items that
+    // aren't on the list. Items absent from the list are typically children
+    // of the selected parents that don't belong to the chosen variant.
+    if (restrictedItemIds && entity.primary_type === _store.itemType && !restrictedItemIds.has(entityId)) return;
     if (!entityIdsByType[entity.primary_type]) entityIdsByType[entity.primary_type] = [];
     entityIdsByType[entity.primary_type].push(entityId);
   });
@@ -449,7 +591,10 @@ export function getDetailGraph(options = {}) {
     .filter(type => (entityIdsByType[type] ?? []).length > 0)
     .map(type => {
       const sortedIds = _sortDetailEntityIds(type, entityIdsByType[type], anchorEntityId, compareEntityIds);
-      const limitedIds = _limitEntityIds(type, sortedIds, maxEntitiesPerType, anchorEntityId, compareEntityIds);
+      // Variant-driven compare passes restrictedItemIds: keep all of them
+      // visible regardless of the per-type cap.
+      const variantMustKeep = restrictedItemIds && type === _store.itemType ? restrictedItemIds : null;
+      const limitedIds = _limitEntityIds(type, sortedIds, maxEntitiesPerType, anchorEntityId, compareEntityIds, variantMustKeep);
       limitedIds.forEach(entityId => keptEntityIds.add(entityId));
       return {
         entityType: type,
@@ -527,6 +672,9 @@ export function getDetailGraph(options = {}) {
     };
   }).filter(anchor => anchor.memberships.length > 0);
 
+  // Co-temporal event merging now happens once globally in buildStore (see
+  // _computeEventMerge), so by the time we reach this point every event is
+  // already canonical. No per-lane dedupe needed here.
   const eventAnchorById = Object.fromEntries(eventAnchors.map(anchor => [anchor.event_id, anchor]));
   normalizedBands.forEach(band => {
     const {
@@ -1676,19 +1824,46 @@ function _resolveDetailTypeOrder(_datasetName, contextEntityIds) {
 
 function _sortDetailEntityIds(type, entityIds, anchorEntityId, compareEntityIds) {
   const compareSet = new Set(compareEntityIds);
+  // For item-type entities, group by parent case so a parent's children sit
+  // together as a contiguous block in the band. Within a parent, sort by
+  // entity_id for deterministic order. Parents are ordered by the position
+  // of their case_entity_id in the compare set (anchor first, then compare
+  // entities in user-supplied order, then any other parents).
+  const isItemType = type === _store?.itemType;
+  const parentOrder = new Map();
+  if (anchorEntityId) parentOrder.set(anchorEntityId, 0);
+  compareEntityIds.forEach((id, i) => { if (!parentOrder.has(id)) parentOrder.set(id, i + 1); });
+  const parentRank = parentCaseId => parentOrder.has(parentCaseId) ? parentOrder.get(parentCaseId) : Number.MAX_SAFE_INTEGER;
+  const parentOf = entityId => {
+    const events = _store.eventsByEntityId[entityId] ?? [];
+    for (const ev of events) if (ev.case_entity_id) return ev.case_entity_id;
+    return null;
+  };
+
   return [...entityIds].sort((a, b) => {
     const aPriority = a === anchorEntityId ? 0 : compareSet.has(a) ? 1 : 2;
     const bPriority = b === anchorEntityId ? 0 : compareSet.has(b) ? 1 : 2;
     if (aPriority !== bPriority) return aPriority - bPriority;
+    if (isItemType) {
+      const aParent = parentOf(a);
+      const bParent = parentOf(b);
+      const aRank = parentRank(aParent);
+      const bRank = parentRank(bParent);
+      if (aRank !== bRank) return aRank - bRank;
+      // Same parent (or both orphan): order alphabetically by entity_id so
+      // items render in their natural sequence (00010, 00020, …).
+      return String(a).localeCompare(String(b));
+    }
     const aEvents = (_store.eventsByEntityId[a] ?? []).length;
     const bEvents = (_store.eventsByEntityId[b] ?? []).length;
     return bEvents - aEvents || _entityLabel(_store.entityById[a]).localeCompare(_entityLabel(_store.entityById[b]));
   });
 }
 
-function _limitEntityIds(type, sortedIds, limit, anchorEntityId, compareEntityIds) {
+function _limitEntityIds(type, sortedIds, limit, anchorEntityId, compareEntityIds, mustKeepIds = null) {
   const keep = [];
   const mustKeep = new Set([anchorEntityId, ...compareEntityIds].filter(entityId => _store.entityById[entityId]?.primary_type === type));
+  if (mustKeepIds) mustKeepIds.forEach(id => mustKeep.add(id));
   sortedIds.forEach(entityId => {
     if (mustKeep.has(entityId) || keep.length < limit) keep.push(entityId);
   });
@@ -1728,7 +1903,8 @@ function _buildLane(entityId, filters) {
 function _buildEventAnchor(eventId, visibleEntityIds) {
   const event = _store.eventById[eventId];
   if (!event) return null;
-  const memberships = (event.memberships ?? []).filter(membership => visibleEntityIds.has(membership.entity_id));
+  const rawMemberships = event.memberships ?? [];
+  const memberships = rawMemberships.filter(membership => visibleEntityIds.has(membership.entity_id));
   if (!memberships.length) return null;
   const sharedEntityIds = memberships.map(membership => membership.entity_id);
   const sharedEntityTypes = [...new Set(memberships.map(membership => membership.entity_type))];
@@ -1737,10 +1913,14 @@ function _buildEventAnchor(eventId, visibleEntityIds) {
   // how many entities are loaded into the current graph, but the event itself
   // participates in more (or different) entities in the full dataset.
   const totalEntityCount = event.entity_ids?.length ?? sharedEntityIds.length;
-  const totalEntityTypes = [...new Set((event.memberships ?? []).map(m => m.entity_type))];
+  const totalEntityTypes = [...new Set(rawMemberships.map(m => m.entity_type))];
   return {
     ...event,
     memberships,
+    // rawMemberships is the unfiltered list — used by the tooltip so the
+    // analyst can navigate to a correlated entity even when that entity is
+    // not currently rendered as a lane in the detail view.
+    rawMemberships,
     sharedEntityIds,
     sharedEntityTypes,
     totalEntityCount,

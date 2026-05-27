@@ -337,13 +337,27 @@ body {
 
 /* ── Entity list ──────────────────────────────────────────────────────────── */
 
-.entity-section { flex: 0 0 auto; max-height: 260px; }
+/* The section card clips its contents — belt-and-braces alongside the inner
+ * scroll container, because in practice the list could still bleed past
+ * the card border into the next panel. The inner .entity-list is the
+ * actual scrollable region. */
+.entity-section {
+  flex: 0 0 auto;
+  min-height: 0;
+  overflow: hidden;
+}
 .entity-list {
+  display: flex;
+  flex-direction: column;
   overflow-y: auto;
-  max-height: 220px;
+  overflow-x: hidden;
+  max-height: min(38vh, 280px);
   scrollbar-width: thin;
   scrollbar-color: rgba(255,255,255,0.12) transparent;
 }
+/* Variant lists reuse .entity-list but live in their own cards; the same
+ * rule keeps them bounded without spilling. */
+.compare-variants-only .entity-list { max-height: min(34vh, 240px); }
 
 .entity-item {
   display: flex;
@@ -454,7 +468,10 @@ body {
 
 .tooltip {
   position: absolute;
-  pointer-events: none;
+  /* pointer-events:auto so the analyst can click entity links inside the
+   * tooltip. The screens use a delayed-hide pattern so the cursor can
+   * travel from the dot to the tooltip without losing it. */
+  pointer-events: auto;
   background: rgba(255,255,255,0.98);
   border: 1px solid rgba(148,163,184,0.26);
   border-radius: 12px;
@@ -462,16 +479,94 @@ body {
   padding: 10px 12px;
   font-size: 12px;
   color: var(--text);
-  max-width: 280px;
+  max-width: 320px;
+  max-height: 460px;
+  overflow-y: auto;
   z-index: 100;
   opacity: 0;
   transform: translateY(4px);
   transition: opacity 0.12s, transform 0.12s;
 }
 
+.tooltip:not(.show) {
+  pointer-events: none;
+}
+
 .tooltip.show {
   opacity: 1;
   transform: translateY(0);
+}
+
+/* ── Tooltip: correlated-entity links ─────────────────────────────────── */
+.tip-entity-group {
+  margin-top: 6px;
+}
+.tip-entity-group-head {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted, #64748b);
+  margin-bottom: 3px;
+}
+.tip-entity-group-list {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.tip-entity-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 11px;
+  color: var(--accent, #2563eb);
+  text-decoration: none;
+  padding: 3px 6px;
+  border-radius: 4px;
+  border: 1px solid transparent;
+  cursor: pointer;
+  word-break: break-all;
+}
+.tip-entity-link:hover {
+  background: rgba(37, 99, 235, 0.10);
+  border-color: rgba(37, 99, 235, 0.32);
+  text-decoration: underline;
+}
+.tip-entity-clipped {
+  color: var(--text-muted, #64748b);
+}
+.tip-entity-clipped:hover {
+  color: var(--accent, #2563eb);
+}
+.tip-entity-current {
+  color: var(--text, #0f172a);
+  font-weight: 700;
+  cursor: default;
+  background: rgba(15, 23, 42, 0.05);
+}
+.tip-entity-current:hover {
+  background: rgba(15, 23, 42, 0.05);
+  border-color: transparent;
+  text-decoration: none;
+}
+.tip-entity-badge {
+  font-family: 'Inter', system-ui, sans-serif;
+  font-size: 9px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-muted, #64748b);
+  padding: 1px 5px;
+  background: rgba(15, 23, 42, 0.08);
+  border-radius: 3px;
+}
+.tip-row-muted { color: var(--text-muted, #64748b); font-size: 11px; }
+.tip-hint {
+  margin-top: 6px;
+  font-size: 10px;
+  font-style: italic;
+  color: var(--text-muted, #64748b);
 }
 
 .tip-title {
@@ -772,6 +867,42 @@ body {
 
 .variant-summary-actions {
   margin-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.variant-summary-hint {
+  font-size: 10.5px;
+  font-style: italic;
+  color: var(--text-inv-muted, rgba(255,255,255,0.55));
+  line-height: 1.45;
+}
+
+/* Inline chip + rows pinned to the top of the Detail Summary panel when the
+ * compare view is scoped to a variant. */
+.variant-scope-chip {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  margin-bottom: 8px;
+  border-radius: 8px;
+  background: rgba(124, 58, 237, 0.18);
+  border: 1px solid rgba(124, 58, 237, 0.46);
+}
+.variant-scope-chip-tag {
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  color: #c4b5fd;
+  background: rgba(124, 58, 237, 0.32);
+  padding: 1px 6px;
+  border-radius: 4px;
+}
+.variant-scope-chip-text {
+  font-size: 11.5px;
+  color: var(--text-inv, #f8fafc);
 }
 
 /* ── Shared events + legend ──────────────────────────────────────────────── */
@@ -782,6 +913,18 @@ body {
   flex-direction: column;
   gap: 6px;
 }
+/* Hotspot list can be long on dense bundles like BPIC19; cap it and scroll
+ * inside so it doesn't push the activity filter out of the sidebar. */
+.shared-event-list {
+  overflow-y: auto;
+  overflow-x: hidden;
+  max-height: min(32vh, 240px);
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255,255,255,0.12) transparent;
+}
+/* The card around the hotspot list should also clip, same belt-and-braces. */
+#sidebar [id="shared-event-list"] { min-height: 0; }
+#sidebar .ctrl-group:has(> #shared-event-list) { overflow: hidden; }
 
 .shared-item,
 .legend-item {
@@ -1071,6 +1214,75 @@ body {
 #sidebar[data-route="home"]      .home-only               { display: block; }
 #sidebar:not([data-route="home"]) .non-home-only           { display: block; }
 body:not([data-route="home"]) .non-home-only               { display: block; }
+
+/* ── Drag-to-zoom time window (T2 / T3-compare) ────────────────────────────
+ *
+ * The interaction lives inside the main #canvas SVG:
+ *   • A background <rect.canvas-brush-bg> sits at the bottom of the SVG
+ *     z-order and catches mousedown on empty canvas space. Nodes/edges in
+ *     gRoot above still get their own clicks.
+ *   • Dragging horizontally paints a translucent vertical band; release
+ *     writes ?dateFrom=&dateTo= and re-renders.
+ *   • A floating chip in the top-right of #canvas-wrap shows the active
+ *     window with a reset ×. It is hidden when no window is set.
+ */
+body.time-brush-active #canvas { cursor: crosshair; }
+/* Per-element overrides so interactive things keep their own cursor. */
+body.time-brush-active #canvas .event-anchor-core,
+body.time-brush-active #canvas .event-cluster-core,
+body.time-brush-active #canvas .lane-marker-circle,
+body.time-brush-active #canvas .df-link,
+body.time-brush-active #canvas .corr-link,
+body.time-brush-active #canvas .relation-link,
+body.time-brush-active #canvas .entity-lane,
+body.time-brush-active #canvas .band-header { cursor: pointer; }
+.canvas-brush-overlay {
+  pointer-events: none;
+  fill: rgba(37, 99, 235, 0.16);
+  stroke: var(--accent, #2563eb);
+  stroke-width: 1;
+}
+
+.time-window-chip {
+  position: absolute;
+  top: 56px;          /* below the topbar */
+  right: 20px;
+  z-index: 8;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  background: rgba(255, 255, 255, 0.97);
+  border: 1px solid var(--accent, #2563eb);
+  border-radius: 6px;
+  padding: 4px 6px 4px 10px;
+  font-size: 11.5px;
+  box-shadow: 0 2px 8px rgba(15, 23, 42, 0.08);
+}
+.time-window-chip.hidden { display: none; }
+.time-window-chip-label {
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--accent, #2563eb);
+  font-size: 10px;
+}
+.time-window-chip-range {
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+}
+.time-window-chip-reset {
+  border: none;
+  background: transparent;
+  color: var(--text-muted, #64748b);
+  cursor: pointer;
+  font-size: 15px;
+  line-height: 1;
+  padding: 0 6px;
+  border-radius: 3px;
+}
+.time-window-chip-reset:hover {
+  background: rgba(220, 38, 38, 0.1);
+  color: var(--danger, #dc2626);
+}
 
 /* T1 (Population) lives on /summarize. */
 #sidebar[data-route="summarize"] .summarize-only { display: block; }
@@ -4128,47 +4340,13 @@ body[data-route="explore"]:not([data-explore-drilled="true"]) .screen-host {
 }
 .t1-btn:hover { background: var(--bg-soft, #f1f5f9); border-color: #cbd5e1; }
 .t1-btn:active { background: #e2e8f0; }
-.t1-btn-play { min-width: 36px; font-size: 13px; }
-
-.t1-speed {
-  display: inline-flex;
-  border: 1px solid var(--border, #e2e8f0);
-  border-radius: 6px;
-  overflow: hidden;
-}
-.t1-speed-btn {
-  border: none;
-  background: #fff;
-  color: var(--text-muted, #64748b);
-  padding: 4px 8px;
-  font-size: 11px;
-  font-family: 'JetBrains Mono', ui-monospace, monospace;
-  cursor: pointer;
-  border-right: 1px solid var(--border, #e2e8f0);
-}
-.t1-speed-btn:last-child { border-right: none; }
-.t1-speed-btn:hover { background: var(--bg-soft, #f1f5f9); }
-.t1-speed-btn.active {
-  background: var(--accent, #2563eb);
-  color: #fff;
-}
-
-.t1-time-readout {
-  font-family: 'JetBrains Mono', ui-monospace, monospace;
-  font-size: 11.5px;
-  color: var(--text, #0f172a);
-  padding: 2px 8px;
-  background: var(--bg-soft, #f1f5f9);
-  border-radius: 4px;
-  min-width: 100px;
-  text-align: center;
-}
 
 .t1-canvas-wrap {
   position: relative;
   flex: 1 1 auto;
   min-height: 240px;
-  overflow: hidden;
+  overflow-x: hidden;
+  overflow-y: auto;
   background: #fff;
 }
 
@@ -4183,10 +4361,8 @@ body[data-route="explore"]:not([data-explore-drilled="true"]) .screen-host {
 .t1-canvas { z-index: 1; }
 .t1-overlay { z-index: 2; pointer-events: none; }
 /* Overlay items that need clicks must opt back in. */
-.t1-overlay .t1-shared-diamond,
-.t1-overlay .t1-pinned-path,
-.t1-overlay .t1-pinned-edge,
-.t1-overlay .t1-cursor-handle { pointer-events: auto; }
+.t1-overlay .t1-selection-line,
+.t1-overlay .t1-selection-line-primary { pointer-events: auto; }
 
 .t1-band-label {
   font-family: 'Inter', system-ui, sans-serif;
@@ -4205,8 +4381,6 @@ body[data-route="explore"]:not([data-explore-drilled="true"]) .screen-host {
   font-size: 10px;
   fill: var(--text-muted, #64748b);
 }
-
-.t1-cursor-handle { cursor: ew-resize; }
 
 .t1-brush-bar {
   flex-shrink: 0;
@@ -4415,6 +4589,136 @@ body[data-route="explore"]:not([data-explore-drilled="true"]) .screen-host {
   line-height: 1;
 }
 .t1-pinned-x:hover { color: var(--danger, #dc2626); }
+
+/* Activity-row labels (left gutter, between band header and data area). */
+.t1-activity-label {
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 10px;
+  fill: var(--text, #0f172a);
+  font-weight: 500;
+}
+/* Activity rows not touched by the current selection fade with the dots. */
+.t1-activity-label.is-dim { fill: #cbd5e1; }
+.t1-activity-guide { pointer-events: none; }
+
+/* Selection visual layer. */
+.t1-selection-line {
+  pointer-events: stroke;
+}
+.t1-selection-line-primary {
+  filter: drop-shadow(0 0 1.5px rgba(15,23,42,0.18));
+}
+.t1-selection-halo { pointer-events: none; }
+
+/* Sidebar selection summary. */
+.t1-selection-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 11.5px;
+}
+.t1-selection-summary {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.t1-selection-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+.t1-selection-label {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--text-muted, #64748b);
+  flex: 0 0 80px;
+}
+.t1-selection-value {
+  flex: 1 1 auto;
+  color: var(--text, #0f172a);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.t1-selection-mono {
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 11px;
+}
+.t1-selection-sub {
+  color: var(--text-muted, #64748b);
+  font-size: 10px;
+  margin-left: 4px;
+}
+.t1-selection-event .t1-selection-value {
+  font-weight: 700;
+}
+
+/* Inspector: sections + correlated entity list. */
+.t1-inspector-section {
+  margin-bottom: 18px;
+  padding-bottom: 14px;
+  border-bottom: 1px solid var(--border, #e2e8f0);
+}
+.t1-inspector-section:last-child { border-bottom: none; }
+.t1-inspector-section-head {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted, #64748b);
+  margin: 0 0 8px 0;
+  cursor: default;
+}
+.t1-inspector-details summary { cursor: pointer; outline: none; }
+.t1-inspector-details summary::-webkit-details-marker { display: none; }
+.t1-inspector-details summary:hover { color: var(--text, #0f172a); }
+
+.t1-event-row { cursor: pointer; }
+.t1-event-row:hover td { background: rgba(37,99,235,0.06); }
+.t1-event-row.is-selected td {
+  background: rgba(37,99,235,0.14);
+  font-weight: 700;
+}
+
+.t1-corr-entity-list {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin-top: 6px;
+}
+.t1-corr-entity-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 6px;
+  border: 1px solid var(--border, #e2e8f0);
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 11px;
+}
+.t1-corr-entity-row:hover {
+  background: var(--bg-soft, #f1f5f9);
+  border-color: #cbd5e1;
+}
+.t1-corr-entity-label {
+  flex: 1 1 auto;
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.t1-corr-entity-type {
+  color: var(--text-muted, #64748b);
+  font-size: 10px;
+  font-weight: 600;
+}
+.t1-corr-entity-count {
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 10px;
+  color: var(--text-muted, #64748b);
+}
 
 .t1-band-list {
   display: flex;

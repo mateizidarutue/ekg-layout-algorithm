@@ -65,8 +65,16 @@ async function init() {
   gRoot = svg.append("g").attr("class", "root")
     .style("transform-origin", "0 0")
     .style("will-change", "transform");
+  // Time-window brush listens for mousedown on the whole SVG so a drag can
+  // start from anywhere — band headers, lane tracks, dots, axis area. The
+  // handler does drag-vs-click disambiguation: if movement < 5 px the
+  // click flows through to whatever was clicked; if movement ≥ 5 px the
+  // drag becomes a brush and the following click is swallowed.
+  svg.on("mousedown.timebrush", _onCanvasTimeBrushDown);
   currentTransform = d3.zoomIdentity;
   addMarkers(svg.append("defs"));
+
+  document.getElementById("time-window-chip-reset")?.addEventListener("click", _resetTimeWindow);
 
   zoom = d3.zoom()
     .scaleExtent([ZOOM_MIN_SCALE, ZOOM_MAX_SCALE])
@@ -186,6 +194,7 @@ function handleRoute(route) {
   _updateSidebarList();
   _updateStatusBar(store);
   _updateHeaderTags(route, store);
+  _updateTimeWindowChip(route);
 }
 
 function _renderLayers(route, store) {
@@ -213,17 +222,22 @@ function _renderLayers(route, store) {
         renderIdentifyPicker(store);
         break;
       }
+      const dateFrom = route.params.dateFrom ? new Date(Number(route.params.dateFrom)) : null;
+      const dateTo   = route.params.dateTo   ? new Date(Number(route.params.dateTo))   : null;
       _detailGraph = getDetailGraph({
         anchorEntityId: entityId,
         visibleEntityTypes: _filters.visibleEntityTypes ?? undefined,
         activities: _effectiveDetailActivities(),
         maxEntitiesPerType: _filters.maxEntitiesPerType,
         sharedOnly: _filters.sharedOnly,
+        dateFrom,
+        dateTo,
       });
       const renderGraph = _resolveDetailRenderGraph(_detailGraph);
       const layout = computeDetailLayout(renderGraph, w);
       drawDetailView(layout, lBg, lMeta, lRel, lCorr, lMeta, lDf, lNodes, lLabels, vis, cb);
       _lastTotalHeight = layout.totalHeight;
+      _cacheTimeAxis(layout);
       _applyVisibility();
       _applySelectionState();
       _fitDetailView();
@@ -333,9 +347,36 @@ function _renderCompareDetail(route, store, w, lBg, lMeta, lRel, lCorr, lDf, lNo
   renderCompareStrip(compareIds, _accentMap, store, id => {
     const next = compareIds.filter(x => x !== id);
     const newEntities = [anchorId, ...next].join(",");
-    navigate("compare", newEntities ? { entities: newEntities } : {});
+    // Preserve the ?variant= scope when removing an entity from the strip,
+    // otherwise the user falls back to "show every item of every parent".
+    const nextParams = newEntities ? { entities: newEntities } : {};
+    if (newEntities && route.params.variant) nextParams.variant = route.params.variant;
+    navigate("compare", nextParams);
   });
 
+  const dateFrom = route.params.dateFrom ? new Date(Number(route.params.dateFrom)) : null;
+  const dateTo   = route.params.dateTo   ? new Date(Number(route.params.dateTo))   : null;
+  // Variant-driven compare: when the URL carries ?variant=<key>, restrict the
+  // item band to only the items that belong to that variant. Otherwise the
+  // scope expansion in getDetailGraph pulls in every item correlated with
+  // the selected parents — including items from other variants — which
+  // defeats the purpose of comparing within a single behavioural variant.
+  let restrictedItemIds = null;
+  let variantContext = null;
+  if (route.params.variant) {
+    try {
+      const variantData = _variantData ?? getVariantOverview({ activities: _filters.activities });
+      const v = variantData.variants.find(x => x.key === route.params.variant);
+      if (v) {
+        restrictedItemIds = (v.items ?? []).map(item => item.id);
+        // Pull caseType from the overview so the scope note reads "3 of 5
+        // purchaseorders" instead of "3 of 5 cases".
+        variantContext = { ...v, caseType: variantData.caseType };
+      }
+    } catch (err) {
+      console.warn("Failed to resolve variant for compare scope:", err);
+    }
+  }
   _detailGraph = getDetailGraph({
     anchorEntityId: anchorId,
     compareEntityIds: compareIds,
@@ -343,21 +384,52 @@ function _renderCompareDetail(route, store, w, lBg, lMeta, lRel, lCorr, lDf, lNo
     activities: _effectiveDetailActivities(),
     maxEntitiesPerType: _filters.maxEntitiesPerType,
     sharedOnly: _filters.sharedOnly,
+    dateFrom,
+    dateTo,
+    restrictedItemIds,
   });
   const renderGraph = _resolveDetailRenderGraph(_detailGraph);
   const layout = computeDetailLayout(renderGraph, w);
   drawDetailView(layout, lBg, lMeta, lRel, lCorr, lMeta, lDf, lNodes, lLabels, vis, cb);
   _lastTotalHeight = layout.totalHeight;
+  _cacheTimeAxis(layout);
   _applyVisibility();
   _applySelectionState();
   _fitDetailView();
   _updateDetailPanels(renderGraph);
+  if (variantContext) _injectVariantScopeNote(variantContext, entityIds);
   _updateClusterActivityPanel(renderGraph);
   _updateClusterIsolationControl(renderGraph);
   _syncMaxEntitiesSlider(_detailGraph);
   _renderEntityTypeFilters(_detailGraph);
   _highlightAnchorLane(anchorId);
   _applyAccentLanes(_accentMap);
+}
+
+// When the compare view is scoped to a variant, prepend a "Variant N — X
+// items" chip plus a one-liner about why this set of parents was picked.
+// The user can see at a glance that the chart is *not* the full population
+// of items for these parents — only the variant subset.
+function _injectVariantScopeNote(variant, compareEntityIds) {
+  const content = document.getElementById("detail-summary-content");
+  if (!content) return;
+  const itemCount = variant.items?.length ?? 0;
+  const memberCount = variant.members?.length ?? 0;
+  content.insertAdjacentHTML("afterbegin", `
+    <div class="variant-scope-chip">
+      <span class="variant-scope-chip-tag">VARIANT ${_escHtml(variant.rank)}</span>
+      <span class="variant-scope-chip-text">${itemCount} item${itemCount === 1 ? "" : "s"} · top ${compareEntityIds.length} of ${memberCount} ${_escHtml((variant.caseType ?? "case").toLowerCase())}${memberCount === 1 ? "" : "s"}</span>
+    </div>
+    <div class="stat-row stat-row-flow">
+      <span class="stat-label">Variant sequence</span>
+      <span class="stat-val">${_escHtml(_formatSequencePreview(variant.sequence ?? []))}</span>
+    </div>
+    <div class="stat-row stat-row-flow">
+      <span class="stat-label">Ranking</span>
+      <span class="stat-val">By items in variant (most first)</span>
+    </div>
+    <div class="stat-divider"></div>
+  `);
 }
 
 function _renderExploreDetail(route, store, w, lBg, lMeta, lRel, lCorr, lDf, lNodes, lLabels, cb, clusterId, dateFrom = null, dateTo = null) {
@@ -642,16 +714,51 @@ function _drawActivityFlowModal(svgEl, dfGraph) {
 }
 
 // ── Tooltip ───────────────────────────────────────────────────────────────────
+//
+// The tooltip supports clickable contents (entity links inside the
+// correlated-entities section). For that to work the tooltip needs
+// `pointer-events: auto`, which means moving the cursor into it triggers a
+// mouseleave on the underlying dot. We use a short delayed-hide pattern so
+// the cursor can travel from the dot to the tooltip without losing it:
+//   • _showTooltip cancels any pending hide.
+//   • _hideTooltip schedules a hide after TOOLTIP_HIDE_DELAY_MS.
+//   • mouseenter on the tooltip cancels the pending hide.
+//   • mouseleave on the tooltip hides immediately.
+//   • a click on an entity link inside navigates and dismisses.
+const TOOLTIP_HIDE_DELAY_MS = 220;
+let _tooltipHideTimer = null;
+
 function _setupTooltip() {
-  document.getElementById("canvas-wrap")?.addEventListener("mouseleave", () =>
-    document.getElementById("tooltip")?.classList.remove("show")
-  );
+  const tip = document.getElementById("tooltip");
+  const wrap = document.getElementById("canvas-wrap");
+  if (!tip || !wrap) return;
+
+  wrap.addEventListener("mouseleave", () => _hideTooltipNow());
+
+  tip.addEventListener("mouseenter", () => {
+    if (_tooltipHideTimer) { clearTimeout(_tooltipHideTimer); _tooltipHideTimer = null; }
+  });
+  tip.addEventListener("mouseleave", () => _hideTooltipNow());
+
+  // Click delegation for "open this entity's lifecycle" links rendered
+  // inside the correlated-entities section of the tooltip.
+  tip.addEventListener("click", e => {
+    const link = e.target.closest("[data-tip-entity-id]");
+    if (!link) return;
+    e.preventDefault();
+    const id = link.getAttribute("data-tip-entity-id");
+    if (!id) return;
+    _hideTooltipNow();
+    navigate("identify", { entity: id });
+  });
 }
 
 function _showTooltip(html, x, y) {
   const tip = document.getElementById("tooltip");
   const wrap = document.getElementById("canvas-wrap");
   if (!tip || !wrap) return;
+
+  if (_tooltipHideTimer) { clearTimeout(_tooltipHideTimer); _tooltipHideTimer = null; }
 
   const coords = (x && typeof x === "object" && Number.isFinite(x.clientX))
     ? _tooltipCoordsFromEvent(x, wrap)
@@ -682,7 +789,17 @@ function _tooltipCoordsFromEvent(event, wrap) {
 }
 
 function _hideTooltip() {
-  document.getElementById("tooltip")?.classList.remove("show");
+  if (_tooltipHideTimer) clearTimeout(_tooltipHideTimer);
+  _tooltipHideTimer = setTimeout(_hideTooltipNow, TOOLTIP_HIDE_DELAY_MS);
+}
+
+function _hideTooltipNow() {
+  if (_tooltipHideTimer) { clearTimeout(_tooltipHideTimer); _tooltipHideTimer = null; }
+  const tip = document.getElementById("tooltip");
+  if (tip) {
+    tip.classList.remove("show");
+    tip.__lastHtml = null;
+  }
 }
 
 // ── Sidebar panels ────────────────────────────────────────────────────────────
@@ -1077,6 +1194,151 @@ function _setActiveEntityInList(entityId) {
   document.querySelectorAll(".entity-item").forEach(el => el.classList.toggle("active", el.dataset.id === entityId));
 }
 
+// ── Drag-to-zoom time window (T2 / T3-compare) ───────────────────────────────
+// On the detail SVG, drag horizontally across empty canvas space to pick a
+// time range. Writes ?dateFrom & ?dateTo and re-fires the route (replace
+// history, not push). A small chip in the top-right of #canvas-wrap shows
+// the active window with a reset ×.
+//
+// Implementation notes:
+//   • The background <rect class="canvas-brush-bg"> appended in init() sits
+//     below gRoot in document order, so nodes/edges in gRoot still receive
+//     their own clicks; the rect only fires when the user drags on a part
+//     of the canvas that has no other element under the cursor.
+//   • The drag overlay is appended directly to <svg>, NOT to gRoot, so the
+//     zoom transform on gRoot does not warp the overlay rectangle.
+//   • Conversion from viewport-x to time uses currentTransform to undo the
+//     CSS transform applied to gRoot.
+//   • _brushAxis caches { TIMELINE_X0, timelineW, rangeMin, rangeMax } from
+//     the most recent detail layout; null on other routes.
+let _brushAxis = null;
+let _activeBrushDrag = null;
+
+function _cacheTimeAxis(layout) {
+  if (!layout?.timeScale || !layout?.axis) { _brushAxis = null; return; }
+  _brushAxis = {
+    TIMELINE_X0: layout.axis.x1,
+    timelineW: Math.max(1, layout.axis.x2 - layout.axis.x1),
+    rangeMin: layout.timeScale.rangeMin,
+    rangeMax: layout.timeScale.rangeMax,
+  };
+}
+
+// Drag threshold in CSS pixels. Below this, the gesture is a click and is
+// allowed to flow through to whatever was clicked (a dot, a band header,
+// the SVG background, etc.). Above this, the gesture becomes a brush and
+// the following click is swallowed by a capture-phase listener.
+const TIME_BRUSH_DRAG_THRESHOLD = 5;
+
+function _onCanvasTimeBrushDown(ev) {
+  if (!_brushAxis) return;
+  const route = getRoute();
+  const isT2 = route.name === "identify" && route.params.entity;
+  const isT3Compare = route.name === "compare" && route.params.entities;
+  if (!isT2 && !isT3Compare) return;
+  if (ev.button !== 0) return;
+  if (ev.shiftKey || ev.ctrlKey || ev.metaKey || ev.altKey) return;
+
+  const svgEl = svg.node();
+  const svgRect = svgEl.getBoundingClientRect();
+  const startVx = ev.clientX - svgRect.left;
+
+  const t = currentTransform ?? d3.zoomIdentity;
+  const minX = _brushAxis.TIMELINE_X0;
+  const maxX = _brushAxis.TIMELINE_X0 + _brushAxis.timelineW;
+
+  let isBrushing = false;
+  let overlay = null;
+
+  const finishDrag = () => {
+    document.removeEventListener("mousemove", onMove, true);
+    document.removeEventListener("mouseup", onUp, true);
+  };
+
+  const onMove = e => {
+    const vx = e.clientX - svgRect.left;
+    const dx = Math.abs(vx - startVx);
+    if (!isBrushing && dx >= TIME_BRUSH_DRAG_THRESHOLD) {
+      isBrushing = true;
+      overlay = svg.append("rect")
+        .attr("class", "canvas-brush-overlay")
+        .attr("x", startVx).attr("y", 0)
+        .attr("width", 0)
+        .attr("height", svgEl.clientHeight);
+      _activeBrushDrag = { startVx, overlay };
+    }
+    if (isBrushing) {
+      const x0 = Math.min(startVx, vx);
+      const x1 = Math.max(startVx, vx);
+      overlay.attr("x", x0).attr("width", x1 - x0);
+      e.preventDefault();
+    }
+  };
+
+  const onUp = e => {
+    finishDrag();
+    if (!isBrushing) {
+      // No drag happened — let the click on the underlying element proceed.
+      // (Selection-clear via canvas click is handled separately below.)
+      return;
+    }
+    overlay.remove();
+    _activeBrushDrag = null;
+    const vx = e.clientX - svgRect.left;
+    const a = Math.min(startVx, vx);
+    const b = Math.max(startVx, vx);
+    const cx0 = Math.max(minX, Math.min(maxX, (a - t.x) / t.k));
+    const cx1 = Math.max(minX, Math.min(maxX, (b - t.x) / t.k));
+    const span = _brushAxis.rangeMax - _brushAxis.rangeMin;
+    const fromMs = Math.round(_brushAxis.rangeMin + ((cx0 - minX) / _brushAxis.timelineW) * span);
+    const toMs   = Math.round(_brushAxis.rangeMin + ((cx1 - minX) / _brushAxis.timelineW) * span);
+    if (toMs - fromMs < 1) return;
+
+    // Swallow the click that the browser will dispatch after this mouseup;
+    // otherwise the underlying element (a dot, a band header) would think
+    // it was clicked at the drag endpoint.
+    const swallow = ce => {
+      ce.stopPropagation();
+      ce.preventDefault();
+      window.removeEventListener("click", swallow, true);
+    };
+    window.addEventListener("click", swallow, true);
+    // Failsafe: detach after a microtask in case no click ever fires.
+    setTimeout(() => window.removeEventListener("click", swallow, true), 0);
+
+    const newParams = { ...route.params, dateFrom: String(fromMs), dateTo: String(toMs) };
+    navigate(route.name, newParams, { replace: true });
+  };
+
+  document.addEventListener("mousemove", onMove, true);
+  document.addEventListener("mouseup", onUp, true);
+}
+
+function _resetTimeWindow() {
+  const route = getRoute();
+  if (!route.params.dateFrom && !route.params.dateTo) return;
+  const newParams = { ...route.params };
+  delete newParams.dateFrom;
+  delete newParams.dateTo;
+  navigate(route.name, newParams, { replace: true });
+}
+
+function _updateTimeWindowChip(route) {
+  const chip = document.getElementById("time-window-chip");
+  const range = document.getElementById("time-window-chip-range");
+  if (!chip || !range) return;
+  const isT2 = route.name === "identify" && route.params.entity;
+  const isT3Compare = route.name === "compare" && route.params.entities;
+  document.body.classList.toggle("time-brush-active", Boolean(isT2 || isT3Compare));
+  const fromMs = Number(route.params.dateFrom) || null;
+  const toMs   = Number(route.params.dateTo) || null;
+  const show = (isT2 || isT3Compare) && fromMs && toMs;
+  chip.classList.toggle("hidden", !show);
+  if (!show) return;
+  const fmt = t => new Date(t).toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" });
+  range.textContent = `${fmt(fromMs)} → ${fmt(toMs)}`;
+}
+
 function _updateHeaderTags(route, store) {
   const tagEl = document.getElementById("panel-view-tag");
   if (!tagEl) return;
@@ -1224,9 +1486,19 @@ function _updateVariantPanels(variantData, selectedVariant) {
 
   const topMembers = (selectedVariant.members ?? []).slice(0, 3).map(x => x.id);
   if (topMembers.length > 1) {
-    summaryContent.insertAdjacentHTML("beforeend", `<div class="variant-summary-actions"><button type="button" class="btn btn-sm" id="btn-compare-top3">Compare top ${topMembers.length} ${_escHtml(caseType.toLowerCase())}</button></div>`);
+    // The top-N picker uses the variant's own `members` ranking, which is
+    // sorted by item count desc → event count desc → label asc (see
+    // getVariantOverview in store.js). So "top 3" means the three parent
+    // entities that own the most items belonging to this variant.
+    const topTitle = `Top ${topMembers.length} ${_escHtml(caseType.toLowerCase())} ranked by items in this variant`;
+    summaryContent.insertAdjacentHTML("beforeend", `<div class="variant-summary-actions">
+      <button type="button" class="btn btn-sm" id="btn-compare-top3" title="${topTitle}">Compare top ${topMembers.length} ${_escHtml(caseType.toLowerCase())}</button>
+      <div class="variant-summary-hint">Ranked by items in this variant (item count → event count → id)</div>
+    </div>`);
     summaryContent.querySelector("#btn-compare-top3")?.addEventListener("click", () => {
-      navigate("compare", { entities: topMembers.join(",") });
+      // Pass the variant key so the compare detail view restricts the
+      // item-band to this variant's items, not every item of every parent.
+      navigate("compare", { entities: topMembers.join(","), variant: selectedVariant.key });
     });
   }
   itemLabel.textContent = `${itemType} in variant (primary)`;

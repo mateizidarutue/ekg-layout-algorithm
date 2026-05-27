@@ -2,10 +2,19 @@
 
 // T1 Lifecycle (Population) screen.
 //
-// Renders an entire dataset as a Canvas 2D dotted-chart: time on x, entity-type
-// bands stacked on y, one dot per (entity, event). Click to pin an entity's
-// df-path, shift-click to pin more, brush below to zoom a time window, press
-// play to advance a fade cursor.
+// Renders an entire dataset as a Canvas 2D dotted-chart:
+//   • x  = event timestamp
+//   • y  = (entity-type band, event activity)  ← activity rows within each band
+//   • color = entity type (band color)
+//
+// Interaction is single-click selection with one-hop propagation across
+// correlated entities. Click an event dot to highlight that entity's full
+// trace plus the traces of all entities co-participating at the clicked event.
+// While a selection is active, activity rows in each band are reordered so
+// the highlighted entities' activities float to the top by first-occurrence
+// time — this makes the primary trace read as a top-left → bottom-right
+// diagonal. Click again on the selected dot, on empty canvas, or press
+// Escape, to clear. URL serialises the selection as ?selected=<eventId>.
 //
 // This is the only screen in the codebase using Canvas 2D. All other screens
 // stay SVG.
@@ -26,27 +35,25 @@ const _state = {
   toolbar: null, canvas: null, overlay: null, brushSvg: null, inspector: null,
 
   timeWindow: null,
-  cursorT: 0,
-  isPlaying: false,
-  speed: 1,
-  rafHandle: null,
-  lastFrame: 0,
 
-  pinnedEntityIds: new Set(),
+  // Single selection model. `null` when nothing is selected.
+  //   eventId           — the clicked event
+  //   primaryEntityId   — the band-of-click entity (one entity, not a set)
+  //   bandIndex         — the band the click happened in
+  //   highlightedEventIds — every event of primary + every event of each
+  //                         co-participant at the selected event
+  //   highlightedEntityIds — primary entity plus co-participants
+  selection: null,
   hoveredDotIndex: null,
 
   searchQuery: "",
   searchMatchEntityIds: new Set(),
 
   hiddenTypes: new Set(),
-  fadeFuture: true,
-  cursorDrag: null,
 
   resizeObs: null,
   brush: null,
 };
-
-const PLAYBACK_FULL_RUN_MS = 30000; // full timeline plays in 30s at 1×.
 
 export function mountSummarizeScreen(opts) {
   const host = document.getElementById("screen-host");
@@ -67,13 +74,7 @@ export function mountSummarizeScreen(opts) {
       <div class="t1-toolbar" id="t1-toolbar">
         <span class="t1-title">T1 — Lifecycle (Population)</span>
         <input type="search" class="t1-search" id="t1-search" placeholder="Search entity id / label…" value="${_escAttr(_state.searchQuery)}" />
-        <button type="button" class="t1-btn t1-btn-play" id="t1-btn-play" aria-label="Play">▶</button>
-        <div class="t1-speed" role="group" aria-label="Playback speed">
-          ${[1,4,16,64].map(sp => `<button type="button" class="t1-speed-btn${sp === _state.speed ? " active" : ""}" data-speed="${sp}">${sp}×</button>`).join("")}
-        </div>
-        <span class="t1-time-readout" id="t1-time-readout">Day 0</span>
         <button type="button" class="t1-btn" id="t1-btn-reset-window">Reset window</button>
-        <button type="button" class="t1-btn" id="t1-btn-reset-cursor">Reset cursor</button>
       </div>
       <div class="t1-canvas-wrap" id="t1-canvas-wrap">
         <canvas id="t1-canvas" class="t1-canvas"></canvas>
@@ -118,7 +119,8 @@ export function mountSummarizeScreen(opts) {
 
   _redraw({ rebuildLayout: true });
   _renderBrush();
-  _refreshPinnedList();
+  _refreshSelectionPanel();
+  if (_state.selection) _openInspector();
 
   if (_state.data.stats.events > 100000) {
     console.warn(`[T1] dot count exceeds 100k (events=${_state.data.stats.events}); frame budget may not hold.`);
@@ -127,9 +129,6 @@ export function mountSummarizeScreen(opts) {
 
 export function unmountSummarizeScreen() {
   if (!_state.active) return;
-  if (_state.rafHandle) cancelAnimationFrame(_state.rafHandle);
-  _state.rafHandle = null;
-  _state.isPlaying = false;
   _state.resizeObs?.disconnect();
   _state.resizeObs = null;
   document.removeEventListener("keydown", _onKeydown);
@@ -172,17 +171,97 @@ function _hydrateFromParams(p) {
     t0: Number.isFinite(t0) ? t0 : range.min,
     t1: Number.isFinite(t1) ? t1 : range.max,
   };
-  const c = Number(p.cursorT);
-  _state.cursorT = Number.isFinite(c) ? c : range.min;
   _state.searchQuery = (p.q ?? "").toString();
-  // Back-compat: ?entity= from the old detail URL form folds into pinned.
-  const pinned = new Set();
-  (p.pinned ?? "").split(",").filter(Boolean).forEach(id => pinned.add(id));
-  (p.entity ?? "").split(",").filter(Boolean).forEach(id => pinned.add(id));
-  _state.pinnedEntityIds = pinned;
-  _state.isPlaying = false;
-  _state.speed = 1;
   _state.hoveredDotIndex = null;
+  _state.selection = null;
+
+  // ── Selection hydration ────────────────────────────────────────────────
+  // Preferred form: ?selected=<eventId>
+  // Back-compat: ?pinned=<id>,<id>,... or ?entity=<id> from the older URL.
+  //   Take the first id, locate its first chronological event, treat as a
+  //   synthetic ?selected=<eventId>, and re-write the URL once on next push.
+  let selectedEventId = (p.selected ?? "").toString().trim();
+  let upgradedFromLegacy = false;
+  if (!selectedEventId) {
+    const legacy = ((p.pinned ?? "") + "," + (p.entity ?? "")).split(",").map(s => s.trim()).filter(Boolean);
+    if (legacy.length) {
+      const firstEv = _firstEventOf(legacy[0]);
+      if (firstEv) {
+        selectedEventId = String(firstEv.event_id);
+        upgradedFromLegacy = true;
+      }
+    }
+  }
+  if (selectedEventId) {
+    _state.selection = _buildSelectionFromEvent(selectedEventId);
+  }
+  if (upgradedFromLegacy && _state.selection) {
+    // Defer the URL rewrite until after mount finishes (history pushes during
+    // module init are fine, but the URL must reflect the new ?selected= form).
+    queueMicrotask(() => _writeUrl(true));
+  }
+}
+
+function _firstEventOf(entityId) {
+  const list = _state.store?.eventsByEntityId?.[entityId] ?? [];
+  if (!list.length) return null;
+  // eventsByEntityId is generally time-ordered, but sort defensively.
+  return list.slice().sort((a, b) => (a.date?.getTime() ?? 0) - (b.date?.getTime() ?? 0))[0];
+}
+
+// Build a full selection record from an event id alone. Used both on click
+// and on URL hydration. For URL hydration, the primary entity is the first
+// entity (in `bandOrder`) that participates in the event — a defensible
+// heuristic since the URL doesn't carry which band the user clicked in.
+function _buildSelectionFromEvent(eventId, primaryEntityHint = null) {
+  const store = _state.store;
+  if (!store) return null;
+  const event = store.eventById?.[eventId];
+  if (!event) return null;
+
+  let primaryEntityId = primaryEntityHint;
+  if (!primaryEntityId) {
+    for (const type of _state.data.bandOrder ?? []) {
+      const ids = event.entity_ids_by_type?.[type] ?? [];
+      if (ids.length) { primaryEntityId = ids[0]; break; }
+    }
+  }
+  if (!primaryEntityId) return null;
+
+  const bandIndex = (_state.data.bandOrder ?? []).indexOf(
+    store.entityById?.[primaryEntityId]?.primary_type
+  );
+
+  // Highlighted event ids: every event of the primary entity plus, at the
+  // selected event only, every event of every co-participant entity.
+  const highlightedEventIds = new Set();
+  const highlightedEntityIds = new Set();
+  highlightedEntityIds.add(primaryEntityId);
+
+  (store.eventsByEntityId?.[primaryEntityId] ?? []).forEach(ev => {
+    highlightedEventIds.add(String(ev.event_id));
+  });
+
+  const edges = store.corrByEventId?.[eventId] ?? [];
+  edges.forEach(edge => {
+    if (!edge.entity_id || edge.entity_id === primaryEntityId) return;
+    highlightedEntityIds.add(edge.entity_id);
+    (store.eventsByEntityId?.[edge.entity_id] ?? []).forEach(ev => {
+      highlightedEventIds.add(String(ev.event_id));
+    });
+  });
+
+  // The selected event itself is always highlighted (it might not be among
+  // the primary's events if the URL was hand-rolled, but include it anyway).
+  highlightedEventIds.add(String(eventId));
+
+  return {
+    eventId: String(eventId),
+    primaryEntityId,
+    bandIndex,
+    highlightedEventIds,
+    highlightedEntityIds,
+  };
 }
 
 function _writeUrl(replace) {
@@ -190,10 +269,9 @@ function _writeUrl(replace) {
   const range = _state.data.timeRange;
   const win = _state.timeWindow;
   const params = new URLSearchParams();
-  if (_state.pinnedEntityIds.size) params.set("pinned", [..._state.pinnedEntityIds].join(","));
+  if (_state.selection?.eventId) params.set("selected", _state.selection.eventId);
   if (win.t0 > range.min) params.set("t0", String(Math.round(win.t0)));
   if (win.t1 < range.max) params.set("t1", String(Math.round(win.t1)));
-  if (_state.cursorT > range.min) params.set("cursorT", String(Math.round(_state.cursorT)));
   if (_state.searchQuery) params.set("q", _state.searchQuery);
   const q = params.toString();
   const hash = `#/summarize${q ? "?" + q : ""}`;
@@ -222,44 +300,58 @@ function _renderSidebar() {
       bandList.appendChild(row);
     });
   }
-  const fadeToggle = document.getElementById("t1-toggle-fade-future");
-  if (fadeToggle) {
-    fadeToggle.checked = _state.fadeFuture;
-    fadeToggle.onchange = e => { _state.fadeFuture = e.target.checked; _drawCanvas(); };
-  }
 }
 
-function _refreshPinnedList() {
-  const list = document.getElementById("t1-pinned-list");
+function _refreshSelectionPanel() {
+  const list = document.getElementById("t1-selection-summary");
   if (!list) return;
-  if (!_state.pinnedEntityIds.size) {
-    list.innerHTML = `<div class="empty-note">Click a dot to pin an entity's lifecycle. Shift-click to pin more.</div>`;
+  const sel = _state.selection;
+  if (!sel) {
+    list.innerHTML = `<div class="empty-note">Click any dot to select an event and reveal its EKG neighbourhood.</div>`;
     return;
   }
-  list.innerHTML = [..._state.pinnedEntityIds].map(id => {
-    const entity = _state.store?.entityById?.[id];
-    const label = _entityLabel(entity, id);
-    const type = entity?.primary_type ?? "?";
-    const color = _state.layout?.bands?.find(b => b.type === type)?.color ?? "#64748b";
-    return `<div class="t1-pinned-row" data-id="${_escAttr(id)}">
-      <span class="t1-pinned-swatch" style="background:${_escAttr(color)}"></span>
-      <span class="t1-pinned-label" title="${_escAttr(label)}">${_escHtml(label)}</span>
-      <span class="t1-pinned-type">${_escHtml(type)}</span>
-      <button type="button" class="t1-pinned-x" aria-label="Unpin">×</button>
-    </div>`;
-  }).join("");
-  list.querySelectorAll(".t1-pinned-row").forEach(row => {
-    row.querySelector(".t1-pinned-x").addEventListener("click", e => {
-      e.stopPropagation();
-      _state.pinnedEntityIds.delete(row.dataset.id);
-      _refreshPinnedList();
-      _redrawOverlay();
-      _writeUrl(false);
-    });
-    row.addEventListener("click", e => {
-      if (e.target.classList.contains("t1-pinned-x")) return;
-      _openInspectorEntity(row.dataset.id);
-    });
+  const store = _state.store;
+  const event = store?.eventById?.[sel.eventId];
+  const entity = store?.entityById?.[sel.primaryEntityId];
+  const ts = event?.date instanceof Date
+    ? event.date.toLocaleString("en-GB", { day: "2-digit", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" })
+    : "—";
+  const primaryLabel = _entityLabel(entity, sel.primaryEntityId);
+  const primaryType = entity?.primary_type ?? "?";
+  const primaryColor = _state.layout?.bands?.find(b => b.type === primaryType)?.color ?? "#64748b";
+  const corrCount = Math.max(0, sel.highlightedEntityIds.size - 1);
+  const evCount = sel.highlightedEventIds.size;
+  list.innerHTML = `
+    <div class="t1-selection-summary">
+      <div class="t1-selection-row t1-selection-event">
+        <span class="t1-selection-label">Event</span>
+        <span class="t1-selection-value">${_escHtml(event?.activity ?? "—")}</span>
+      </div>
+      <div class="t1-selection-row">
+        <span class="t1-selection-label">When</span>
+        <span class="t1-selection-value t1-selection-mono">${_escHtml(ts)}</span>
+      </div>
+      <div class="t1-selection-row">
+        <span class="t1-selection-label">Primary</span>
+        <span class="t1-selection-value">
+          <span class="t1-pinned-swatch" style="background:${_escAttr(primaryColor)}"></span>
+          ${_escHtml(primaryLabel)}
+          <span class="t1-selection-sub">${_escHtml(primaryType)}</span>
+        </span>
+      </div>
+      <div class="t1-selection-row">
+        <span class="t1-selection-label">Correlated</span>
+        <span class="t1-selection-value t1-selection-mono">${corrCount} entit${corrCount === 1 ? "y" : "ies"}</span>
+      </div>
+      <div class="t1-selection-row">
+        <span class="t1-selection-label">Highlighted</span>
+        <span class="t1-selection-value t1-selection-mono">${evCount} events</span>
+      </div>
+      <button type="button" class="t1-btn" id="t1-btn-clear-selection">Clear selection</button>
+    </div>
+  `;
+  list.querySelector("#t1-btn-clear-selection")?.addEventListener("click", () => {
+    _clearSelection();
   });
 }
 
@@ -272,23 +364,11 @@ function _bindToolbar() {
     _drawCanvas();
     _writeUrl(true);
   });
-  document.getElementById("t1-btn-play")?.addEventListener("click", _togglePlay);
-  document.querySelectorAll(".t1-speed-btn").forEach(btn => {
-    btn.addEventListener("click", () => {
-      _state.speed = Number(btn.dataset.speed) || 1;
-      document.querySelectorAll(".t1-speed-btn").forEach(b => b.classList.toggle("active", b === btn));
-    });
-  });
   document.getElementById("t1-btn-reset-window")?.addEventListener("click", () => {
     _state.timeWindow = { t0: _state.data.timeRange.min, t1: _state.data.timeRange.max };
     _redraw({ rebuildLayout: true });
     _renderBrush();
     _writeUrl(false);
-  });
-  document.getElementById("t1-btn-reset-cursor")?.addEventListener("click", () => {
-    _state.cursorT = _state.data.timeRange.min;
-    _drawCanvas(); _redrawOverlay(); _updateTimeReadout();
-    _writeUrl(true);
   });
   document.getElementById("t1-inspector-close")?.addEventListener("click", _closeInspector);
 }
@@ -341,21 +421,34 @@ function _onCanvasClick(e) {
   const mx = e.clientX - rect.left;
   const my = e.clientY - rect.top;
   const hit = _state.quadtree.find(mx, my, 6);
-  if (!hit) return;
-  const d = _state.layout.dotPositions[hit.__idx];
-  const entityId = d.entityId;
-  if (e.shiftKey) {
-    if (_state.pinnedEntityIds.has(entityId)) _state.pinnedEntityIds.delete(entityId);
-    else _state.pinnedEntityIds.add(entityId);
-  } else {
-    if (_state.pinnedEntityIds.has(entityId) && _state.pinnedEntityIds.size === 1) {
-      _openInspectorEntity(entityId);
-      return;
-    }
-    _state.pinnedEntityIds = new Set([entityId]);
+
+  // Empty-space click clears the selection.
+  if (!hit) {
+    if (_state.selection) _clearSelection();
+    return;
   }
-  _refreshPinnedList();
-  _redrawOverlay();
+  const d = _state.layout.dotPositions[hit.__idx];
+
+  // Click on the currently selected dot toggles off (clear).
+  if (_state.selection
+      && String(_state.selection.eventId) === String(d.eventId)
+      && _state.selection.primaryEntityId === d.entityId) {
+    _clearSelection();
+    return;
+  }
+
+  _state.selection = _buildSelectionFromEvent(String(d.eventId), d.entityId);
+  _refreshSelectionPanel();
+  _redraw({ rebuildLayout: true }); // activity rows reorder per band
+  _openInspector();
+  _writeUrl(false);
+}
+
+function _clearSelection() {
+  _state.selection = null;
+  _refreshSelectionPanel();
+  _closeInspector();
+  _redraw({ rebuildLayout: true }); // restore default activity ordering
   _writeUrl(false);
 }
 
@@ -372,25 +465,9 @@ function _onKeydown(e) {
     if (e.key === "Escape") e.target.blur();
     return;
   }
-  if (e.key === " ") { e.preventDefault(); _togglePlay(); return; }
-  if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
-    e.preventDefault();
-    const range = _state.data.timeRange;
-    const span = range.max - range.min;
-    const frac = e.shiftKey ? 0.1 : 0.01;
-    const dir = e.key === "ArrowRight" ? 1 : -1;
-    _state.cursorT = Math.max(range.min, Math.min(range.max, _state.cursorT + dir * frac * span));
-    _drawCanvas(); _redrawOverlay(); _updateTimeReadout();
-    _writeUrl(true);
-    return;
-  }
   if (e.key === "Escape") {
-    if (_state.pinnedEntityIds.size || !_state.inspector?.classList.contains("hidden")) {
-      _state.pinnedEntityIds.clear();
-      _closeInspector();
-      _refreshPinnedList();
-      _redrawOverlay();
-      _writeUrl(false);
+    if (_state.selection || !_state.inspector?.classList.contains("hidden")) {
+      _clearSelection();
     }
     return;
   }
@@ -402,7 +479,6 @@ function _onKeydown(e) {
   if (e.key === "0") {
     const range = _state.data.timeRange;
     _state.timeWindow = { t0: range.min, t1: range.max };
-    _state.cursorT = range.min;
     _redraw({ rebuildLayout: true });
     _renderBrush();
     _writeUrl(false);
@@ -412,57 +488,6 @@ function _onKeydown(e) {
 function _onResize() {
   _redraw({ rebuildLayout: true });
   _renderBrush();
-}
-
-// ── Playback ──────────────────────────────────────────────────────────────────
-
-function _togglePlay() {
-  _state.isPlaying = !_state.isPlaying;
-  const btn = document.getElementById("t1-btn-play");
-  if (btn) btn.textContent = _state.isPlaying ? "❚❚" : "▶";
-  if (_state.isPlaying) {
-    if (_state.cursorT >= _state.data.timeRange.max) _state.cursorT = _state.data.timeRange.min;
-    _state.lastFrame = performance.now();
-    _state.rafHandle = requestAnimationFrame(_tick);
-  } else if (_state.rafHandle) {
-    cancelAnimationFrame(_state.rafHandle);
-    _state.rafHandle = null;
-  }
-}
-
-function _tick(now) {
-  if (!_state.isPlaying || !_state.active) { _state.rafHandle = null; return; }
-  const dt = now - _state.lastFrame;
-  _state.lastFrame = now;
-  const range = _state.data.timeRange;
-  const span = range.max - range.min;
-  const dataMsPerWallMs = (span / PLAYBACK_FULL_RUN_MS) * _state.speed;
-  _state.cursorT = Math.min(range.max, _state.cursorT + dt * dataMsPerWallMs);
-  _drawCanvas();
-  _redrawOverlayCursorOnly();
-  _updateTimeReadout();
-  if (_state.cursorT >= range.max) {
-    _state.isPlaying = false;
-    const btn = document.getElementById("t1-btn-play");
-    if (btn) btn.textContent = "▶";
-    _state.rafHandle = null;
-    return;
-  }
-  _state.rafHandle = requestAnimationFrame(_tick);
-}
-
-// During playback we only want to move the cursor line; full overlay re-render
-// is too heavy per-frame. Update just the cursor group.
-function _redrawOverlayCursorOnly() {
-  if (!_state.layout || !_state.overlay || typeof d3 === "undefined") return;
-  const layout = _state.layout;
-  const clampedT = Math.max(layout.timeWindow.t0, Math.min(layout.timeWindow.t1, _state.cursorT));
-  const cx = layout.xScale(clampedT);
-  const cursor = d3.select(_state.overlay).select(".t1-cursor");
-  if (cursor.empty()) { _redrawOverlay(); return; }
-  cursor.select("line").attr("x1", cx).attr("x2", cx);
-  cursor.select("polygon")
-    .attr("points", `${cx - 6},${layout.innerTop - 14} ${cx + 6},${layout.innerTop - 14} ${cx},${layout.innerTop - 4}`);
 }
 
 // ── Brush ─────────────────────────────────────────────────────────────────────
@@ -565,41 +590,146 @@ function _updateBrushReadout() {
 
 // ── Inspector ────────────────────────────────────────────────────────────────
 
-function _openInspectorEntity(entityId) {
-  const entity = _state.store?.entityById?.[entityId];
-  if (!entity) return;
+function _openInspector() {
+  const sel = _state.selection;
+  if (!sel) { _closeInspector(); return; }
+  const store = _state.store;
+  if (!store) return;
+
+  const event = store.eventById?.[sel.eventId];
+  const primary = store.entityById?.[sel.primaryEntityId];
+  if (!event || !primary) { _closeInspector(); return; }
+
   const title = document.getElementById("t1-inspector-title");
   const body = document.getElementById("t1-inspector-body");
-  if (title) title.textContent = `${entity.primary_type} · ${_entityLabel(entity, entityId)}`;
-  if (!body) return;
-  const events = (_state.store.eventsByEntityId?.[entityId] ?? []).slice()
-    .sort((a, b) => (a.date?.getTime() ?? 0) - (b.date?.getTime() ?? 0));
-  const dfEdges = _state.store.dfByEntityId?.[entityId] ?? [];
-  const rows = events.map(ev => {
-    const sync = ev.entity_ids?.length ?? 1;
-    const types = [...new Set((ev.memberships ?? []).map(m => m.entity_type))].join(", ");
-    const t = ev.date instanceof Date
-      ? ev.date.toLocaleString("en-GB", { day: "2-digit", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" })
-      : "—";
-    return `<tr><td>${_escHtml(t)}</td><td>${_escHtml(ev.activity ?? "")}</td><td>${sync}</td><td>${_escHtml(types)}</td></tr>`;
-  }).join("");
-  body.innerHTML = `
-    <div class="t1-inspector-meta">
-      <div><b>Entity id:</b> ${_escHtml(entityId)}</div>
-      <div><b>Events:</b> ${events.length}</div>
-      <div><b>DF edges:</b> ${dfEdges.length}</div>
-    </div>
-    <table class="t1-inspector-table">
-      <thead><tr><th>Time</th><th>Activity</th><th>Sync</th><th>Correlated types</th></tr></thead>
-      <tbody>${rows || `<tr><td colspan="4">No events in window.</td></tr>`}</tbody>
-    </table>
-    <div class="t1-inspector-actions">
-      <button type="button" class="t1-btn" id="t1-inspector-open-detail">Open T2 detail →</button>
-    </div>
-  `;
-  body.querySelector("#t1-inspector-open-detail")?.addEventListener("click", () => {
-    _state.navigateToDetail?.(entityId);
+  if (!title || !body) return;
+
+  const eventTs = event.date instanceof Date
+    ? event.date.toLocaleString("en-GB", { day: "2-digit", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" })
+    : "—";
+
+  title.textContent = `${event.activity ?? "Event"} · ${eventTs}`;
+
+  // ── Event panel: id, activity, timestamp, sync, correlated entities ──
+  const correlatedByType = new Map();
+  const edges = store.corrByEventId?.[sel.eventId] ?? [];
+  edges.forEach(edge => {
+    const e = store.entityById?.[edge.entity_id];
+    const type = e?.primary_type ?? "?";
+    if (!correlatedByType.has(type)) correlatedByType.set(type, []);
+    correlatedByType.get(type).push({ id: edge.entity_id, label: _entityLabel(e, edge.entity_id) });
   });
+  const corrGroupsHtml = [...correlatedByType.entries()].map(([type, list]) => `
+    <div class="t1-inspector-group">
+      <div class="t1-inspector-group-head">${_escHtml(type)} · ${list.length}</div>
+      <ul>${list.map(it => `
+        <li><a href="#" class="t1-inspector-entity-link" data-id="${_escAttr(it.id)}">${_escHtml(it.label)}</a></li>
+      `).join("")}</ul>
+    </div>`).join("");
+
+  // ── Primary entity panel: full event sequence ──
+  const primaryEvents = (store.eventsByEntityId?.[sel.primaryEntityId] ?? []).slice()
+    .sort((a, b) => (a.date?.getTime() ?? 0) - (b.date?.getTime() ?? 0));
+  const primaryRows = primaryEvents.map(ev => {
+    const sync = ev.entity_ids?.length ?? 1;
+    const isSelected = String(ev.event_id) === String(sel.eventId);
+    const t = ev.date instanceof Date
+      ? ev.date.toLocaleString("en-GB", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" })
+      : "—";
+    return `<tr class="t1-event-row${isSelected ? " is-selected" : ""}" data-event-id="${_escAttr(ev.event_id)}">
+      <td>${_escHtml(t)}</td>
+      <td>${_escHtml(ev.activity ?? "")}</td>
+      <td>${sync}</td>
+    </tr>`;
+  }).join("");
+
+  // ── Correlated entities panel (collapsed by default) ──
+  const otherEntities = [...sel.highlightedEntityIds]
+    .filter(id => id !== sel.primaryEntityId)
+    .map(id => {
+      const e = store.entityById?.[id];
+      const count = (store.eventsByEntityId?.[id] ?? []).length;
+      return {
+        id, label: _entityLabel(e, id),
+        type: e?.primary_type ?? "?",
+        count,
+      };
+    })
+    .sort((a, b) => b.count - a.count || a.id.localeCompare(b.id));
+
+  const corrEntityRowsHtml = otherEntities.map(o => {
+    const color = _state.layout?.bands?.find(b => b.type === o.type)?.color ?? "#64748b";
+    return `<div class="t1-corr-entity-row" data-id="${_escAttr(o.id)}" data-action="switch-primary">
+      <span class="t1-pinned-swatch" style="background:${_escAttr(color)}"></span>
+      <span class="t1-corr-entity-label">${_escHtml(o.label)}</span>
+      <span class="t1-corr-entity-type">${_escHtml(o.type)}</span>
+      <span class="t1-corr-entity-count">${o.count} ev</span>
+    </div>`;
+  }).join("");
+
+  body.innerHTML = `
+    <section class="t1-inspector-section">
+      <h3 class="t1-inspector-section-head">Event</h3>
+      <div class="t1-inspector-meta">
+        <div><b>Activity:</b> ${_escHtml(event.activity ?? "—")}</div>
+        <div><b>Time:</b> ${_escHtml(eventTs)}</div>
+        <div><b>Event id:</b> <span class="t1-selection-mono">${_escHtml(sel.eventId)}</span></div>
+        <div><b>Sync degree:</b> ${event.entity_ids?.length ?? 1} entities across ${correlatedByType.size} types</div>
+      </div>
+      <div class="t1-inspector-groups">${corrGroupsHtml || `<div class="empty-note">No correlated entities.</div>`}</div>
+    </section>
+
+    <section class="t1-inspector-section">
+      <h3 class="t1-inspector-section-head">Primary entity · ${_escHtml(primary.primary_type ?? "")}</h3>
+      <div class="t1-inspector-meta">
+        <div><b>Label:</b> ${_escHtml(_entityLabel(primary, sel.primaryEntityId))}</div>
+        <div><b>Entity id:</b> <span class="t1-selection-mono">${_escHtml(sel.primaryEntityId)}</span></div>
+        <div><b>Events:</b> ${primaryEvents.length}</div>
+      </div>
+      <table class="t1-inspector-table">
+        <thead><tr><th>Time</th><th>Activity</th><th>Sync</th></tr></thead>
+        <tbody>${primaryRows || `<tr><td colspan="3">No events.</td></tr>`}</tbody>
+      </table>
+      <div class="t1-inspector-actions">
+        <button type="button" class="t1-btn" id="t1-inspector-open-detail">Open T2 detail →</button>
+      </div>
+    </section>
+
+    <section class="t1-inspector-section">
+      <details class="t1-inspector-details">
+        <summary class="t1-inspector-section-head">
+          Correlated entities · ${otherEntities.length}
+        </summary>
+        <div class="t1-corr-entity-list">${corrEntityRowsHtml || `<div class="empty-note">No correlated entities.</div>`}</div>
+      </details>
+    </section>
+  `;
+
+  // Wire interactions
+  body.querySelectorAll(".t1-inspector-entity-link").forEach(a => {
+    a.addEventListener("click", e => {
+      e.preventDefault();
+      _switchPrimaryEntity(a.dataset.id);
+    });
+  });
+  body.querySelectorAll(".t1-event-row").forEach(row => {
+    row.addEventListener("click", () => {
+      const newEventId = row.dataset.eventId;
+      if (!newEventId || newEventId === sel.eventId) return;
+      _state.selection = _buildSelectionFromEvent(newEventId, sel.primaryEntityId);
+      _refreshSelectionPanel();
+      _redraw({ rebuildLayout: true });
+      _openInspector();
+      _writeUrl(false);
+    });
+  });
+  body.querySelectorAll(".t1-corr-entity-row[data-action='switch-primary']").forEach(row => {
+    row.addEventListener("click", () => _switchPrimaryEntity(row.dataset.id));
+  });
+  body.querySelector("#t1-inspector-open-detail")?.addEventListener("click", () => {
+    _state.navigateToDetail?.(sel.primaryEntityId);
+  });
+
   _state.inspector?.classList.remove("hidden");
 }
 
@@ -639,21 +769,54 @@ function _redraw({ rebuildLayout = false } = {}) {
       viewport: { width, height },
       timeWindow: _state.timeWindow,
       visibleTypes,
+      selectionActivityOrder: _buildSelectionActivityOrder(_state.selection),
     });
     _state.quadtree = _buildQuadtree(_state.layout.dotPositions);
     _updateSearchMatches();
   }
   _drawCanvas();
   _redrawOverlay();
-  _updateTimeReadout();
+}
+
+// Build per-band activity ordering for the current selection:
+//   typeName → Array<{ activity, firstT }>  (sorted by firstT asc)
+// where firstT is the earliest time among highlighted events of that activity
+// that touch the given entity type. This is what makes the primary entity's
+// trace plot as a clean top-left → bottom-right staircase, with neighbours
+// reading as deviations from that staircase.
+function _buildSelectionActivityOrder(selection) {
+  if (!selection?.highlightedEventIds?.size) return null;
+  const store = _state.store;
+  if (!store) return null;
+  const perTypeFirst = new Map(); // type → Map<activity, firstT>
+  selection.highlightedEventIds.forEach(eventId => {
+    const ev = store.eventById?.[eventId];
+    if (!ev || !(ev.date instanceof Date)) return;
+    const t = ev.date.getTime();
+    const seen = new Set();
+    (ev.memberships ?? []).forEach(m => {
+      if (seen.has(m.entity_type)) return;
+      seen.add(m.entity_type);
+      if (!perTypeFirst.has(m.entity_type)) perTypeFirst.set(m.entity_type, new Map());
+      const inner = perTypeFirst.get(m.entity_type);
+      const prev = inner.get(ev.activity);
+      if (prev == null || t < prev) inner.set(ev.activity, t);
+    });
+  });
+  const out = new Map();
+  perTypeFirst.forEach((activityMap, type) => {
+    const ordered = [...activityMap.entries()]
+      .sort((a, b) => a[1] - b[1])
+      .map(([activity, firstT]) => ({ activity, firstT }));
+    out.set(type, ordered);
+  });
+  return out;
 }
 
 function _drawCanvas() {
   if (!_state.layout) return;
   drawCanvasPass(_state.canvas, _state.layout, {
-    cursorT: _state.cursorT,
-    fadeFuture: _state.fadeFuture,
-    pinnedEntityIds: _state.pinnedEntityIds,
+    selection: _state.selection,
     hoveredDotIndex: _state.hoveredDotIndex,
     searchQuery: _state.searchQuery,
     searchMatchEntityIds: _state.searchMatchEntityIds,
@@ -663,38 +826,23 @@ function _drawCanvas() {
 function _redrawOverlay() {
   if (!_state.layout) return;
   drawOverlayPass(_state.overlay, _state.layout, {
-    cursorT: _state.cursorT,
-    pinnedEntityIds: _state.pinnedEntityIds,
+    selection: _state.selection,
     hoveredDotIndex: _state.hoveredDotIndex,
   }, _state.store, {
-    onPinnedPathClick: entityId => _openInspectorEntity(entityId),
-    onCursorDragStart: ev => _beginCursorDrag(ev),
+    onSelectionLineClick: entityId => _switchPrimaryEntity(entityId),
   });
 }
 
-// ── Cursor drag ───────────────────────────────────────────────────────────────
-
-function _beginCursorDrag(ev) {
-  if (!_state.layout) return;
-  ev.preventDefault();
-  if (_state.isPlaying) _togglePlay();
-  const onMove = e => {
-    const rect = _state.overlay.getBoundingClientRect();
-    const x = Math.max(_state.layout.innerLeft, Math.min(_state.layout.innerRight, e.clientX - rect.left));
-    const win = _state.layout.timeWindow;
-    const frac = (x - _state.layout.innerLeft) / Math.max(1, _state.layout.innerRight - _state.layout.innerLeft);
-    _state.cursorT = win.t0 + frac * (win.t1 - win.t0);
-    _drawCanvas();
-    _redrawOverlay();
-    _updateTimeReadout();
-  };
-  const onUp = () => {
-    document.removeEventListener("mousemove", onMove);
-    document.removeEventListener("mouseup", onUp);
-    _writeUrl(false);
-  };
-  document.addEventListener("mousemove", onMove);
-  document.addEventListener("mouseup", onUp);
+// Switching the primary entity inside an active selection: pick that entity's
+// first chronological event as the new selection anchor, re-derive the hop.
+function _switchPrimaryEntity(entityId) {
+  const first = _firstEventOf(entityId);
+  if (!first) return;
+  _state.selection = _buildSelectionFromEvent(String(first.event_id), entityId);
+  _refreshSelectionPanel();
+  _redraw({ rebuildLayout: true });
+  _openInspector();
+  _writeUrl(false);
 }
 
 function _buildQuadtree(dots) {
@@ -705,17 +853,6 @@ function _buildQuadtree(dots) {
     tree.add(dots[i]);
   }
   return tree;
-}
-
-function _updateTimeReadout() {
-  const el = document.getElementById("t1-time-readout");
-  if (!el || !_state.data) return;
-  const minT = _state.data.timeRange.min;
-  const days = (_state.cursorT - minT) / 86400000;
-  const dayPart = Math.floor(Math.max(0, days));
-  const d = new Date(_state.cursorT);
-  const hm = d.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" });
-  el.textContent = `Day ${dayPart}, ${hm}`;
 }
 
 // ── Utilities ─────────────────────────────────────────────────────────────────

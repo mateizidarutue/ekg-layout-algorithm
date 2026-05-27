@@ -32,12 +32,10 @@ export function drawDetailView(layout, lBg, lMeta, lDfPo, lCorr, lRes, lDfItem, 
 
   _drawAxis(layout.axis, layout.totalHeight, lBg, lLabels);
 
-  lMeta.selectAll(null).data(layout.anchorRail.filter(anchor => anchor.y < layout.axis.y - 6)).join("line")
-    .attr("class", "event-stem")
-    .attr("x1", d => d.x).attr("y1", d => d.y + d.r + 2)
-    .attr("x2", d => d.x).attr("y2", layout.axis.y - 4)
-    .attr("stroke", "rgba(148,163,184,0.32)")
-    .attr("stroke-width", 1.1);
+  // (removed) Event-stem connectors and stacked anchor dots above the axis:
+  // they cluttered the top of the canvas with overlapping circles on dense
+  // bundles. Shared events are still indicated by the vertical "spine" lines
+  // through the bands plus the small node on the axis line itself.
 
   // Event spines: one vertical colored line per shared event, axis → lowest correlated lane
   lMeta.selectAll(null).data(layout.sharedGuides).join("line")
@@ -85,45 +83,10 @@ export function drawDetailView(layout, lBg, lMeta, lDfPo, lCorr, lRes, lDfItem, 
 
   layout.bands.forEach((band, bandIndex) => _drawBand(band, bandIndex, lBg, lMeta, lDfItem, lNodes, lLabels, cb));
 
-  lCorr.selectAll(null).data(layout.corrLinks).join("line")
-    .attr("class", "corr-link")
-    .attr("data-event-id", d => d.event_id)
-    .attr("data-entity-id", d => d.entity_id)
-    .attr("x1", d => d.x1).attr("y1", d => d.y1).attr("x2", d => d.x2).attr("y2", d => d.y2)
-    .attr("stroke", "rgba(51,65,85,0.18)")
-    .attr("stroke-width", 1)
-    .attr("stroke-dasharray", "3 5");
-
-  const anchorNodes = lNodes.selectAll(null).data(layout.anchorRail).join("g")
-    .attr("class", "event-anchor")
-    .attr("data-event-id", d => d.event_id)
-    .attr("transform", d => `translate(${d.x},${d.y})`)
-    .style("cursor", "pointer")
-    .on("click", (ev, d) => {
-      ev.stopPropagation();
-      cb.onEventSelect?.({
-        id: d.event_id,
-        sharedEntityIds: d.sharedEntityIds,
-      });
-    })
-    .on("mousemove", (ev, d) => cb.onTooltipShow(_eventTooltip(d), ev))
-    .on("mouseleave", cb.onTooltipHide);
-
-  anchorNodes.append("circle")
-    .attr("r", d => d.r + (d.isSharedEvent ? 5 : 3))
-    .attr("fill", "rgba(255,255,255,0.96)")
-    .attr("stroke", "rgba(100,116,139,0.18)")
-    .attr("stroke-width", 1.2)
-    .attr("class", "event-anchor-ring");
-
-  anchorNodes.append("circle")
-    .attr("r", d => d.r)
-    .attr("fill", d => d.activityColor ?? "#64748b")
-    .attr("stroke", "rgba(255,255,255,0.92)")
-    .attr("stroke-width", 1.2)
-    .attr("class", "event-anchor-core");
-
-  _drawLifecycleGlyphs(layout.anchorRail, lNodes);
+  // (removed) Anchor rail (stacked event dots above the axis),
+  // anchor-to-lane correlation dashed lines, and START/END lifecycle
+  // glyphs. The detail view now communicates events solely through the
+  // dots on each lane plus the colored vertical spines for shared events.
 
   lLabels.append("text")
     .attr("x", DETAIL_PAD_X).attr("y", 40)
@@ -213,6 +176,19 @@ function _drawBand(band, bandIndex, lBg, lMeta, lDfItem, lNodes, lLabels, cb) {
     .attr("font-family", "JetBrains Mono, monospace").attr("font-size", "10px")
     .attr("fill", "var(--text-dim)")
     .text(`${band.lanes.length} lanes`);
+
+  // Faint dashed separator between parent-grouped sub-blocks (only set on
+  // child bands where lanes have a meaningful parent case id; the parent
+  // band itself never has any breaks).
+  (band.parentGroupBreaks ?? []).forEach(brk => {
+    lBg.append("line")
+      .attr("class", "parent-group-break")
+      .attr("x1", band.x + 14).attr("x2", band.x + band.width - 14)
+      .attr("y1", brk.y).attr("y2", brk.y)
+      .attr("stroke", "rgba(100,116,139,0.34)")
+      .attr("stroke-width", 1)
+      .attr("stroke-dasharray", "4 4");
+  });
 
   band.lanes.forEach(lane => _drawLane(lane, bandColor, lBg, lMeta, lDfItem, lNodes, lLabels, cb));
 }
@@ -330,15 +306,12 @@ function _eventTooltip(anchor) {
   const resourceRows = anchor.resource_labels?.length
     ? `<div class="tip-row">Resources: <b>${anchor.resource_labels.join(", ")}</b></div>`
     : "";
-  const membershipRows = (anchor.memberships ?? [])
-    .map(membership => `<div class="tip-row">${membership.entity_type}: <b>${membership.entity_label}</b></div>`)
-    .join("");
-  const totalCount = anchor.totalEntityCount ?? anchor.sharedEntityIds?.length ?? 0;
-  const visibleCount = anchor.sharedEntityIds?.length ?? 0;
-  const sharedLabel = totalCount > 1
-    ? `Yes — ×${totalCount} entities${totalCount !== visibleCount ? ` (${visibleCount} in view)` : ""}`
-    : "No";
-  return `<div class="tip-title">${anchor.activity}</div><div class="tip-row">Event: <b>${anchor.event_id}</b></div><div class="tip-row">Time: <b>${timestamp}</b></div><div class="tip-row">Shared: <b>${sharedLabel}</b></div>${resourceRows}<div class="tip-divider"></div>${membershipRows}`;
+  const memberSection = _renderCorrelatedEntities(anchor, null);
+  return `<div class="tip-title">${anchor.activity}</div>
+    <div class="tip-row">Event: <b>${anchor.event_id}</b></div>
+    <div class="tip-row">Time: <b>${timestamp}</b></div>
+    ${resourceRows}
+    ${memberSection}`;
 }
 
 function _laneTooltip(lane) {
@@ -350,12 +323,79 @@ function _laneTooltip(lane) {
 
 function _membershipTooltip(lane, anchor) {
   if (!anchor) return "";
-  const totalCount = anchor.totalEntityCount ?? anchor.sharedEntityIds?.length ?? 0;
-  const visibleCount = anchor.sharedEntityIds?.length ?? 0;
-  const countNote = totalCount > 1
-    ? `×${totalCount} entities${totalCount !== visibleCount ? ` (${visibleCount} visible here)` : ""}`
-    : "1 entity";
-  return `<div class="tip-title">${anchor.activity}</div><div class="tip-row">Entity: <b>${lane.entityLabel}</b></div><div class="tip-row">Type: <b>${lane.entityType}</b></div><div class="tip-row">Time: <b>${anchor.date?.toLocaleString() ?? "n/a"}</b></div><div class="tip-row">Shared: <b>${countNote}</b></div>`;
+  const timestamp = anchor.date?.toLocaleString() ?? "n/a";
+  const memberSection = _renderCorrelatedEntities(anchor, lane.entity_id);
+  return `<div class="tip-title">${anchor.activity}</div>
+    <div class="tip-row">Entity: <b>${lane.entityLabel}</b></div>
+    <div class="tip-row">Type: <b>${lane.entityType}</b></div>
+    <div class="tip-row">Time: <b>${timestamp}</b></div>
+    ${memberSection}`;
+}
+
+// Builds the clickable "Correlated entities" section used in both the
+// per-lane and per-anchor tooltips. Groups by entity_type; entities that
+// are visible in the current view are rendered as primary links, those
+// outside it as faint links with an "open in new view" hint. The active
+// lane's own entity is rendered in a "current" style with no link.
+function _renderCorrelatedEntities(anchor, currentEntityId) {
+  const visibleMembers = anchor.memberships ?? [];
+  // rawMemberships is the unfiltered list from the underlying event(s).
+  // Fall back to visibleMembers if missing (e.g., older code paths).
+  const allMembers = anchor.rawMemberships?.length ? anchor.rawMemberships : visibleMembers;
+  if (!allMembers.length) return "";
+  const visibleIds = new Set(visibleMembers.map(m => m.entity_id));
+
+  // Group by entity_type, preserving insertion order.
+  const byType = new Map();
+  allMembers.forEach(m => {
+    if (!byType.has(m.entity_type)) byType.set(m.entity_type, []);
+    byType.get(m.entity_type).push(m);
+  });
+
+  const groupRows = [...byType.entries()].map(([type, members]) => {
+    const links = members.map(m => {
+      const label = m.entity_label ?? m.entity_id;
+      const isCurrent = m.entity_id === currentEntityId;
+      const inView = visibleIds.has(m.entity_id);
+      if (isCurrent) {
+        return `<span class="tip-entity-link tip-entity-current" title="Current entity"
+          >${_esc(label)}<span class="tip-entity-badge">current</span></span>`;
+      }
+      const cls = inView ? "tip-entity-link" : "tip-entity-link tip-entity-clipped";
+      const title = inView
+        ? "Click to open this entity's lifecycle"
+        : "Not in current view — click to open its lifecycle";
+      return `<a class="${cls}" data-tip-entity-id="${_escAttr(m.entity_id)}"
+        title="${_escAttr(title)}" href="#/identify?entity=${encodeURIComponent(m.entity_id)}"
+        >${_esc(label)}</a>`;
+    }).join("");
+    return `<div class="tip-entity-group">
+      <div class="tip-entity-group-head">${_esc(type)} · ${members.length}</div>
+      <div class="tip-entity-group-list">${links}</div>
+    </div>`;
+  }).join("");
+
+  const total = allMembers.length;
+  const visible = visibleMembers.length;
+  const summary = total === 1
+    ? `1 correlated entity`
+    : `${total} correlated entities${total !== visible ? ` (${visible} visible in this view)` : ""}`;
+
+  return `<div class="tip-divider"></div>
+    <div class="tip-subtitle">Correlated entities</div>
+    <div class="tip-row tip-row-muted">${summary}</div>
+    ${groupRows}
+    <div class="tip-row tip-hint">Click any entity to open its lifecycle</div>`;
+}
+
+function _esc(v) {
+  return String(v ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;");
+}
+function _escAttr(v) {
+  return _esc(v).replaceAll('"', "&quot;");
 }
 
 // Tooltip for event-spine lines and their axis dots.

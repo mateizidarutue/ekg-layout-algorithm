@@ -62,10 +62,12 @@ export function computeDetailLayout(graph, width) {
   const soloAnchorSeeds = seeds.filter(anchor => !anchor.isSharedEvent);
   const soloXs = soloAnchorSeeds.map(anchor => anchor.x);
   const stackRows = _assignAnchorRows(soloAnchorSeeds, soloXs);
-  const stackDepth = Math.max(...stackRows, -1) + 1;
   const clusterSeeds = _buildSharedEventClusters(seeds.filter(anchor => anchor.isSharedEvent));
-  const clusterDepth = Math.max(...clusterSeeds.map(cluster => cluster.laneIndex), -1) + 1;
-  const railDepth = Math.max(stackDepth, 1) * EVENT_STACK_GAP;
+  // The stacked anchor rail above the timeline is no longer rendered, so
+  // we don't need vertical space for it. Anchor y positions are still
+  // computed (some downstream maps reference them), but at virtual offsets
+  // above the visible axis — they just never get drawn.
+  const railDepth = 0;
   const axisY = DETAIL_PAD_TOP + HEADER_RESERVED_H + railDepth + 18;
   const sharedEventClusters = clusterSeeds.map(cluster => ({
     ...cluster,
@@ -90,11 +92,32 @@ export function computeDetailLayout(graph, width) {
   });
   const anchorById = Object.fromEntries(laidAnchors.map(anchor => [anchor.event_id, anchor]));
 
-  let currentY = axisY + 58;
+  // Lanes inside a band are visually grouped by their parent case entity.
+  // Each time the parent changes between consecutive lanes we add this many
+  // pixels of extra space, so a parent's children render as a contiguous
+  // block separated from the next parent's block. The parent-of-this-lane
+  // check skips lanes whose own entity_id IS the case id (i.e., the parent
+  // band itself), so the parent band stays uniformly spaced.
+  const PARENT_GROUP_GAP = 14;
+
+  let currentY = axisY + 36;
   const laidBands = bands.map((band, bandIndex) => {
     const bandTop = currentY;
+    let cumulativeOffset = 0;
+    let prevParent = null;
+    const parentGroupBreaks = [];
     const lanes = band.lanes.map((lane, laneIndex) => {
-      const y = bandTop + BAND_HEADER_H + laneIndex * LANE_H + LANE_H / 2;
+      const myParent = lane.events?.[0]?.case_entity_id ?? null;
+      const isOwnParent = lane.entity_id === myParent;
+      if (!isOwnParent && laneIndex > 0 && myParent && prevParent && myParent !== prevParent) {
+        // Mid-band parent transition → insert a gap and remember the break
+        // line so the renderer can draw a faint divider.
+        const breakY = bandTop + BAND_HEADER_H + laneIndex * LANE_H + cumulativeOffset + PARENT_GROUP_GAP / 2 - LANE_H / 2;
+        parentGroupBreaks.push({ y: breakY, parentCaseId: myParent });
+        cumulativeOffset += PARENT_GROUP_GAP;
+      }
+      if (!isOwnParent) prevParent = myParent;
+      const y = bandTop + BAND_HEADER_H + laneIndex * LANE_H + cumulativeOffset + LANE_H / 2;
       const memberships = (lane.memberships ?? []).map(membership => ({
         ...membership,
         x: membership.anchor?.x ?? anchorById[membership.event_id]?.x ?? TIMELINE_X0,
@@ -125,12 +148,13 @@ export function computeDetailLayout(graph, width) {
         x: bandX + 10,
         width: bandWidth - 20,
         y,
+        parentCaseId: myParent,
         memberships,
         dfEdges,
         relationPortX: RELATION_PORT_X,
       };
     });
-    const bandHeight = BAND_HEADER_H + Math.max(lanes.length, 1) * LANE_H;
+    const bandHeight = BAND_HEADER_H + Math.max(lanes.length, 1) * LANE_H + cumulativeOffset;
     currentY += bandHeight + BAND_GAP;
     return {
       ...band,
@@ -139,6 +163,7 @@ export function computeDetailLayout(graph, width) {
       y: bandTop,
       height: bandHeight,
       lanes,
+      parentGroupBreaks,
       headerY: bandTop + 22,
     };
   });
