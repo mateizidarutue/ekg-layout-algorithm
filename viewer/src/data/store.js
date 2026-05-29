@@ -1122,203 +1122,24 @@ export function getGlobalSharedEventHotspots({ activities = null, entityTypeFilt
   return hotspots.filter(h => h.eventCount > 0);
 }
 
-// ── EKG Atlas: complete-EKG aggregator for the primary T1 view ──────────────
-//
-// Produces a single bundle that powers all three coordinated panels of the
-// Atlas screen. Computed lazily on demand; safe to call repeatedly because the
-// underlying store maps are immutable per dataset load.
-//
-// Returns:
-//   stats         – global counts (events, entities, types, sharedEvents…)
-//   timeRange     – {min,max} ms timestamps spanning visible events
-//   typeNodes     – nodes for the force-directed type graph
-//   typeEdges     – edges (structural + shared-event weights)
-//   streamBins    – time-binned event counts per entity type (streamgraph)
-//   streamTypes   – stable stack order for streamgraph layers
-//   activityBands – reuses getTypeEKGGraph for the per-type activity flow panel
-//   topActivities – global top-N activities by frequency
-//   topHotspots   – top shared-event hotspots (≥2 entity types)
-export function getEkgAtlas(filters = {}) {
-  if (!_store) throw new Error("Store not built.");
-  const { activities = null, dateFrom = null, dateTo = null } = filters;
-
-  // Apply global filters once; reuse the filtered slice for every panel.
-  const filteredEvents = _filterEvents(_store.events, { activities, dateFrom, dateTo });
-  const filteredEventIdSet = new Set(filteredEvents.map(event => event.event_id));
-
-  // ── Time range ──
-  const times = filteredEvents.map(event => event.date?.getTime()).filter(Number.isFinite);
-  const timeRange = times.length
-    ? { min: Math.min(...times), max: Math.max(...times) }
-    : { min: 0, max: 1 };
-
-  // ── Type nodes ──
-  const typeRegistry = _store.typeRegistry;
-  const eventsByType = {};
-  filteredEvents.forEach(event => {
-    const types = new Set(event.memberships.map(m => m.entity_type));
-    types.forEach(type => {
-      if (!eventsByType[type]) eventsByType[type] = 0;
-      eventsByType[type] += 1;
-    });
-  });
-
-  const typeNodes = (typeRegistry?.types ?? []).map(typeInfo => ({
-    id: typeInfo.name,
-    label: typeInfo.displayLabel,
-    role: typeInfo.role,
-    color: typeInfo.color,
-    entityCount: typeInfo.count,
-    eventCount: eventsByType[typeInfo.name] ?? 0,
-  })).filter(node => node.entityCount > 0);
-
-  // ── Type edges: shared-event co-occurrence + structural relations ──
-  const sharedPairCounts = new Map();
-  filteredEvents.forEach(event => {
-    const types = [...new Set(event.memberships.map(m => m.entity_type))].sort();
-    if (types.length < 2) return;
-    for (let i = 0; i < types.length; i++) {
-      for (let j = i + 1; j < types.length; j++) {
-        const key = `${types[i]}\x00${types[j]}`;
-        sharedPairCounts.set(key, (sharedPairCounts.get(key) ?? 0) + 1);
-      }
-    }
-  });
-
-  const structuralPairCounts = new Map();
-  (_store.relations ?? []).forEach(relation => {
-    const a = relation.source_entity_type;
-    const b = relation.target_entity_type;
-    if (!a || !b || a === b) return;
-    const key = a < b ? `${a}\x00${b}` : `${b}\x00${a}`;
-    structuralPairCounts.set(key, (structuralPairCounts.get(key) ?? 0) + 1);
-  });
-
-  const typeNodeSet = new Set(typeNodes.map(n => n.id));
-  const typeEdgesMap = new Map();
-  sharedPairCounts.forEach((count, key) => {
-    const [a, b] = key.split("\x00");
-    if (!typeNodeSet.has(a) || !typeNodeSet.has(b)) return;
-    typeEdgesMap.set(key, {
-      source: a, target: b,
-      sharedEventCount: count,
-      structuralRelationCount: structuralPairCounts.get(key) ?? 0,
-      kind: structuralPairCounts.has(key) ? "both" : "shared",
-    });
-  });
-  structuralPairCounts.forEach((count, key) => {
-    if (typeEdgesMap.has(key)) return;
-    const [a, b] = key.split("\x00");
-    if (!typeNodeSet.has(a) || !typeNodeSet.has(b)) return;
-    typeEdgesMap.set(key, {
-      source: a, target: b,
-      sharedEventCount: 0,
-      structuralRelationCount: count,
-      kind: "structural",
-    });
-  });
-  const typeEdges = [...typeEdgesMap.values()];
-
-  // ── Streamgraph: time-binned counts per type ──
-  const ATLAS_BIN_COUNT = 48;
-  const span = Math.max(timeRange.max - timeRange.min, 1);
-  const binWidth = span / ATLAS_BIN_COUNT;
-  const streamBins = Array.from({ length: ATLAS_BIN_COUNT }, (_, i) => ({
-    binIndex: i,
-    t0: timeRange.min + i * binWidth,
-    t1: timeRange.min + (i + 1) * binWidth,
-    countsByType: {},
-    total: 0,
-  }));
-  filteredEvents.forEach(event => {
-    const t = event.date?.getTime();
-    if (!Number.isFinite(t)) return;
-    const i = Math.min(ATLAS_BIN_COUNT - 1, Math.max(0, Math.floor((t - timeRange.min) / binWidth)));
-    const bin = streamBins[i];
-    const seenTypes = new Set();
-    event.memberships.forEach(m => {
-      if (seenTypes.has(m.entity_type)) return;
-      seenTypes.add(m.entity_type);
-      bin.countsByType[m.entity_type] = (bin.countsByType[m.entity_type] ?? 0) + 1;
-      bin.total += 1;
-    });
-  });
-
-  // Stack order: by role (case→item→other→resource→attribute) then total volume desc.
-  const streamTypes = [...typeNodes]
-    .sort((a, b) => {
-      const order = { case: 0, item: 1, other: 2, resource: 3, attribute: 4 };
-      const ra = order[a.role] ?? 2;
-      const rb = order[b.role] ?? 2;
-      if (ra !== rb) return ra - rb;
-      return b.eventCount - a.eventCount;
-    })
-    .map(t => t.id);
-
-  // ── Activity-flow bands (reuse typeEKG aggregates for the third panel) ──
-  // We rebuild it locally so the filter (dateFrom/dateTo) is respected;
-  // getTypeEKGGraph only honors `activities`. The structure is identical so
-  // overviewLayout.computeTypeEKGLayout can be reused as-is.
-  const activityBands = _buildAtlasActivityBands(filteredEvents, filteredEventIdSet, timeRange);
-
-  // ── Top activities (overall) ──
-  const activityCounts = {};
-  filteredEvents.forEach(event => {
-    activityCounts[event.activity] = (activityCounts[event.activity] ?? 0) + 1;
-  });
-  const topActivities = Object.entries(activityCounts)
-    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
-    .slice(0, 6)
-    .map(([activity, count]) => ({
-      activity, count,
-      color: _store.activityColorByName[activity] ?? "#64748b",
-    }));
-
-  // ── Top shared-event hotspots ──
-  const topHotspots = getGlobalSharedEventHotspots({ activities, minSharedEntities: 2 }).slice(0, 5);
-
-  // ── Stats ──
-  const stats = {
-    events: filteredEvents.length,
-    totalEvents: _store.events.length,
-    entities: _store.entities.length,
-    entityTypes: typeNodes.length,
-    sharedEvents: filteredEvents.filter(event => event.entity_ids.length >= 2).length,
-    typeEdges: typeEdges.length,
-    totalCorr: _store.corr.length,
-    totalRelations: _store.relations.length,
-  };
-
-  return {
-    isEkgAtlas: true,
-    stats,
-    timeRange,
-    typeNodes,
-    typeEdges,
-    streamBins,
-    streamTypes,
-    activityBands,
-    topActivities,
-    topHotspots,
-    caseType: _store.caseType,
-    itemType: _store.itemType,
-    filterContext: { activities, dateFrom, dateTo },
-  };
-}
-
-// ── EKG View: multi-scale (L0–L3) data aggregator for the new /ekg screen ──
+// ── getEkgView: aggregator for the T1 population view at /summarize ────────
 //
 // Design follows Shneiderman's "overview, zoom and filter, details on demand"
 // mantra (1996) and the Performance Spectrum's time-axis-aligned encoding
-// (Denisov, Belkina & Fahland 2018): one time scale shared across all bands
-// and zoom levels, with the *encoding* changing per level — not the spatial
-// frame. The data layer prepares all four levels' inputs in one pass so the
-// view can switch levels without re-querying the store.
+// (Denisov, Belkina & Fahland 2018): one shared time scale across all bands.
+// The data layer computes everything T1 needs in one pass:
 //
-//   L0 Galaxy        → per-bin × per-type × per-activity counts (heat strips)
-//   L1 District      → activity-flow bands (reuses _buildAtlasActivityBands)
-//   L2 Neighbourhood → per-entity sparklines, sorted chronologically
-//   L3 Street        → caller invokes getDetailGraph lazily on the focus entity
+//   bins             → per-bin × per-type × per-activity counts (used for the
+//                      focus-context brush density strip below the canvas)
+//   activityBands    → activity-flow bands (kept for reference; T1's current
+//                      encoding stacks activity ROWS within each type band,
+//                      built downstream in summarizeLayout)
+//   sparklinesByType → per-entity event lists, sorted chronologically (the
+//                      dot data source for the Canvas 2D pass)
+//   spines           → events touching ≥2 entity types (drawn as vertical
+//                      shared-event spines in T2 detail; the T1 screen no
+//                      longer renders these as ticks but uses them for the
+//                      `isShared` flag on each event)
 //
 // Returns shapes documented inline at the return statement.
 const EKG_VIEW_BIN_COUNT = 48;
@@ -1339,7 +1160,7 @@ export function getEkgView(filters = {}) {
   const binWidth = span / EKG_VIEW_BIN_COUNT;
   const binFor = t => Math.min(EKG_VIEW_BIN_COUNT - 1, Math.max(0, Math.floor((t - timeRange.min) / binWidth)));
 
-  // ── L0 bins: per-bin × per-type × per-activity counts ──
+  // ── Density bins: per-bin × per-type × per-activity counts ──
   // Each event is counted once *per unique entity type it touches*. That keeps
   // a single event from inflating one type's count while still letting the
   // total reflect (event, type) pairs. This invariant is what the test suite
@@ -1373,7 +1194,7 @@ export function getEkgView(filters = {}) {
 
   const globalDensity = bins.map(bin => bin.total);
 
-  // ── L2 sparklines: one row per entity, sorted by firstTime ──
+  // ── Per-entity sparklines: one row per entity, sorted by firstTime ──
   const sparklinesByType = Object.create(null);
   const eventsByEntity = _store.eventsByEntityId ?? {};
   Object.keys(_store.entityIdsByType ?? {}).forEach(type => {
@@ -1428,8 +1249,8 @@ export function getEkgView(filters = {}) {
   });
   spines.sort((a, b) => a.t - b.t || a.event_id.localeCompare(b.event_id));
 
-  // ── L1 activity bands: reuse the atlas helper (single source of truth) ──
-  const activityBands = _buildAtlasActivityBands(filteredEvents, filteredEventIdSet, timeRange);
+  // ── Activity bands: per-type per-activity event counts in time bins ──
+  const activityBands = _buildActivityBands(filteredEvents, filteredEventIdSet, timeRange);
 
   // ── Type metadata, ordered by role (cases → items → other → resource → attribute) ──
   const typeRegistry = _store.typeRegistry;
@@ -1488,7 +1309,7 @@ export function getEkgView(filters = {}) {
   };
 }
 
-function _buildAtlasActivityBands(filteredEvents, _filteredEventIdSet, timeRange) {
+function _buildActivityBands(filteredEvents, _filteredEventIdSet, timeRange) {
   const eventsByType = {};
   filteredEvents.forEach(event => {
     const types = [...new Set(event.memberships.map(m => m.entity_type))];
@@ -1557,93 +1378,6 @@ function _buildAtlasActivityBands(filteredEvents, _filteredEventIdSet, timeRange
     syncArcs: Object.values(syncMap).sort((a, b) => b.count - a.count).slice(0, 56),
     minTime: timeRange.min,
     maxTime: timeRange.max,
-    totalEvents: filteredEvents.length,
-    caseType: _store.caseType,
-    itemType: _store.itemType,
-  };
-}
-
-export function getTypeEKGGraph(filters = {}) {
-  if (!_store) return null;
-  const activities = filters.activities ?? null;
-
-  const filteredEvents = _store.events.filter(e => !activities || activities.has(e.activity));
-
-  // Group events by entity type (an event appears in all types it's correlated to)
-  const eventsByType = {};
-  filteredEvents.forEach(event => {
-    const types = [...new Set(event.memberships.map(m => m.entity_type))];
-    types.forEach(type => {
-      if (!eventsByType[type]) eventsByType[type] = [];
-      eventsByType[type].push(event);
-    });
-  });
-
-  const entityTypes = Object.keys(eventsByType).sort((a, b) =>
-    eventsByType[b].length - eventsByType[a].length
-  );
-
-  // Aggregate activity nodes per type (count + mean timestamp)
-  const bandsByType = {};
-  entityTypes.forEach(type => {
-    const actMap = {};
-    eventsByType[type].forEach(event => {
-      if (!actMap[event.activity]) actMap[event.activity] = { count: 0, sum: 0, n: 0 };
-      actMap[event.activity].count++;
-      if (event.date) { actMap[event.activity].sum += event.date.getTime(); actMap[event.activity].n++; }
-    });
-    bandsByType[type] = {
-      nodes: Object.entries(actMap).map(([activity, d]) => ({
-        activity,
-        count: d.count,
-        meanTimestamp: d.n > 0 ? d.sum / d.n : 0,
-      })).sort((a, b) => a.meanTimestamp - b.meanTimestamp),
-      dfEdges: [],
-    };
-  });
-
-  // Build DF transition counts per entity type from raw DF edges
-  const dfByType = {};
-  _store.df.forEach(edge => {
-    const entity = _store.entityById[edge.entity_id];
-    if (!entity || !bandsByType[entity.primary_type]) return;
-    const srcAct = _store.eventById[edge.source]?.activity;
-    const tgtAct = _store.eventById[edge.target]?.activity;
-    if (!srcAct || !tgtAct) return;
-    if (activities && (!activities.has(srcAct) || !activities.has(tgtAct))) return;
-    const type = entity.primary_type;
-    if (!dfByType[type]) dfByType[type] = {};
-    const key = `${srcAct}\x00${tgtAct}`;
-    dfByType[type][key] = (dfByType[type][key] ?? 0) + 1;
-  });
-  entityTypes.forEach(type => {
-    bandsByType[type].dfEdges = Object.entries(dfByType[type] ?? {})
-      .map(([key, count]) => { const [source, target] = key.split("\x00"); return { source, target, count }; })
-      .sort((a, b) => b.count - a.count)
-      .slice(0, 28);
-  });
-
-  // Cross-type sync arcs: events correlated to 2+ entity types
-  const syncMap = {};
-  filteredEvents.forEach(event => {
-    const types = [...new Set(event.memberships.map(m => m.entity_type))].sort();
-    if (types.length < 2) return;
-    for (let i = 0; i < types.length; i++) {
-      for (let j = i + 1; j < types.length; j++) {
-        const key = `${event.activity}\x00${types[i]}\x00${types[j]}`;
-        if (!syncMap[key]) syncMap[key] = { activity: event.activity, type1: types[i], type2: types[j], count: 0 };
-        syncMap[key].count++;
-      }
-    }
-  });
-
-  const allTimes = filteredEvents.map(e => e.date?.getTime()).filter(Number.isFinite);
-  return {
-    entityTypes,
-    bandsByType,
-    syncArcs: Object.values(syncMap).sort((a, b) => b.count - a.count).slice(0, 48),
-    minTime: allTimes.length ? Math.min(...allTimes) : 0,
-    maxTime: allTimes.length ? Math.max(...allTimes) : 1,
     totalEvents: filteredEvents.length,
     caseType: _store.caseType,
     itemType: _store.itemType,

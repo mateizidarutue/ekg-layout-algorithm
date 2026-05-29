@@ -5,25 +5,25 @@ import { getVariantOverview } from "../data/store.js";
 
 const PRIMARY_TASK = {
   id: "T1", route: "summarize", label: "Lifecycle (Population)",
-  tuple: "⟨Identify, Path⟩",
-  desc: "Every event of every entity in one Canvas 2D dotted-chart: time on x, entity-type bands on y, vertical ticks where three or more entity types share an event. Click a dot to pin its full directly-follows path; shift-click to pin more. Brush the mini axis to zoom a time window, press play to advance the cursor.",
+  tuple: "⟨Summarize, Topology⟩",
+  desc: "Every event of every entity in one Canvas 2D dotted-chart: time on x, activity rows within entity-type bands on y, entity-type colour. Click any dot to highlight that entity's full trace plus every entity co-participating at the selected event (one-hop propagation across correlations); the band's activity rows reorder so the primary trace runs as a top-left → bottom-right diagonal. Brush the mini axis below the canvas to zoom a time window.",
 };
 
 const SUPPORTING_TASKS = [
   {
-    id: "T2", route: "identify", label: "Identify (Detail)",
+    id: "T2", route: "identify", label: "Lifecycle (Detail)",
     tuple: "⟨Identify, Path⟩",
-    desc: "Open one entity and read its full multi-band detail slice — bottleneck waits, shared-event guides, optional correlation and structural-relation overlays.",
+    desc: "Open one entity and read its full multi-band detail slice — bottleneck waits, vertical shared-event spines, optional correlation and structural-relation overlays. Drag horizontally on the canvas to zoom a time window; hover any event for a tooltip listing every correlated entity, each clickable to jump to its lifecycle.",
   },
   {
-    id: "T3", route: "compare", label: "Compare (Variants)",
+    id: "T3", route: "compare", label: "Compare",
     tuple: "⟨Compare, Paths⟩",
-    desc: "Group entities into behavioural variants, then place multiple lifelines on the same canvas to compare dominant and deviant flows.",
+    desc: "Group entities into behavioural variants ranked by frequency, then \"Compare top N\" opens a variant-scoped multi-lifeline canvas where children are grouped on the y axis by their parent case.",
   },
   {
-    id: "T4", route: "explore", label: "Explore (Shared Events)",
+    id: "T4", route: "explore", label: "Explore",
     tuple: "⟨Explore, Features⟩",
-    desc: "Find shared events where multiple entity lifecycles intersect — the synchronisation points that distinguish object-centric processes from flat event logs.",
+    desc: "Find shared events where three or more entity lifecycles intersect — the synchronisation points that distinguish object-centric processes from flat event logs.",
   },
 ];
 
@@ -72,7 +72,6 @@ export function renderHome(store, manifest, currentDatasetName) {
           ${_statCard(typeCount.toLocaleString(), "Entity types")}
           ${_statCard(store.events.length.toLocaleString(), "Events")}
           ${_statCard(store.allActivities.length.toLocaleString(), "Activities")}
-          ${_statCard((store.communities?.length ?? 0).toLocaleString(), "Communities")}
           ${_statCard(String(variantCount), "Variants")}
         </div>
 
