@@ -7,6 +7,24 @@ import {
   DETAIL_PAD_X, TIMELINE_X0, LANE_MARKER_R,
 } from "../layout/detailLayout.js";
 
+// Lane expansion toggle (the [+]/[−] chip just to the right of the lane's
+// colored stripe). Geometry is relative to lane.x so it lands in every
+// lane's left margin without colliding with the stripe at lane.x + 8.
+const LANE_TOGGLE_CX   = 18; // center, offset from lane.x
+const LANE_TOGGLE_SIZE = 12;
+const LANE_LABEL_DX    = 32; // label x offset from lane.x (pushed right of the toggle)
+
+// Lane-marker radius. T1/T2/T3 keep the binary channel (shared = enlarged,
+// single-type = small). On T4 (explore-cluster) the shared-event size becomes
+// a graduated function of synchronization degree so a higher-degree event
+// renders larger — a refinement of the binary channel, T4 only.
+function _laneMarkerRadius(anchor, scope) {
+  if (!anchor?.isSharedEvent) return LANE_MARKER_R;
+  if (scope !== "explore-cluster") return LANE_MARKER_R + 1.8;
+  const degree = anchor.sharedEntityIds?.length ?? 2;
+  return LANE_MARKER_R + 1.0 + Math.min(Math.max(degree - 2, 0), 5) * 0.9;
+}
+
 export function drawDetailView(layout, lBg, lMeta, lDfPo, lCorr, lRes, lDfItem, lNodes, lLabels, vis, cb) {
   const anchorEntity = layout.anchorEntity;
   const totalWidth = Math.max(layout.totalWidth ?? (layout.axis.x2 + 56), 1120);
@@ -81,7 +99,7 @@ export function drawDetailView(layout, lBg, lMeta, lDfPo, lCorr, lRes, lDfItem, 
     ))
     .on("mouseleave", cb.onTooltipHide);
 
-  layout.bands.forEach((band, bandIndex) => _drawBand(band, bandIndex, lBg, lMeta, lDfItem, lNodes, lLabels, cb));
+  layout.bands.forEach((band, bandIndex) => _drawBand(band, bandIndex, lBg, lMeta, lDfItem, lNodes, lLabels, cb, layout.scope));
 
   // (removed) Anchor rail (stacked event dots above the axis),
   // anchor-to-lane correlation dashed lines, and START/END lifecycle
@@ -144,7 +162,7 @@ function _drawAxis(axis, totalHeight, lBg, lLabels) {
     .text("TIMELINE");
 }
 
-function _drawBand(band, bandIndex, lBg, lMeta, lDfItem, lNodes, lLabels, cb) {
+function _drawBand(band, bandIndex, lBg, lMeta, lDfItem, lNodes, lLabels, cb, scope) {
   const bandColor = _bandColor(band.entityType);
 
   lBg.append("rect")
@@ -190,15 +208,19 @@ function _drawBand(band, bandIndex, lBg, lMeta, lDfItem, lNodes, lLabels, cb) {
       .attr("stroke-dasharray", "4 4");
   });
 
-  band.lanes.forEach(lane => _drawLane(lane, bandColor, lBg, lMeta, lDfItem, lNodes, lLabels, cb));
+  band.lanes.forEach(lane => _drawLane(lane, bandColor, lBg, lMeta, lDfItem, lNodes, lLabels, cb, scope));
 }
 
-function _drawLane(lane, bandColor, lBg, lMeta, lDfItem, lNodes, lLabels, cb) {
+function _drawLane(lane, bandColor, lBg, lMeta, lDfItem, lNodes, lLabels, cb, scope) {
   const laneClass = "entity-lane";
   const rowFill = "rgba(248,250,252,0.84)";
   const rowStroke = "rgba(148,163,184,0.2)";
   const markerFill = "rgba(255,255,255,0.9)";
   const statusText = `${lane.eventCount} events`;
+  // Color each lane by its own entity type rather than the band it sits in.
+  // In normal bands this equals bandColor, but per-case compare bands mix a
+  // case lane with item lanes, so they must be distinguished by type.
+  const laneColor = lane.entityType ? _bandColor(lane.entityType) : bandColor;
 
   lNodes.append("rect")
     .attr("class", laneClass)
@@ -212,13 +234,50 @@ function _drawLane(lane, bandColor, lBg, lMeta, lDfItem, lNodes, lLabels, cb) {
 
   lNodes.append("rect")
     .attr("x", lane.x + 8).attr("y", lane.y - 9).attr("width", 4).attr("height", 18).attr("rx", 2)
-    .attr("fill", rgba(bandColor, 0.88));
+    .attr("fill", rgba(laneColor, 0.88));
+
+  // Expand/collapse toggle for the per-entity details table. Always drawn
+  // so analysts can open any lane on demand; the canvas is otherwise
+  // unaffected when nothing is expanded.
+  const isExpanded = Boolean(lane.expansion?.open);
+  const toggleCx = lane.x + LANE_TOGGLE_CX;
+  const toggleG = lNodes.append("g")
+    .attr("class", "lane-expand-toggle" + (isExpanded ? " lane-expand-toggle-open" : ""))
+    .attr("data-entity-id", lane.entity_id)
+    .attr("transform", `translate(${toggleCx},${lane.y})`)
+    .style("cursor", "pointer")
+    .on("click", ev => {
+      ev.stopPropagation();
+      cb.onLaneExpansionToggle?.(lane.entity_id);
+    })
+    .on("mousemove", ev => cb.onTooltipShow(
+      `<div class="tip-row">${isExpanded ? "Collapse" : "Expand"} event details for <b>${ellipsis(lane.entityLabel, 28)}</b></div>`,
+      ev
+    ))
+    .on("mouseleave", cb.onTooltipHide);
+  toggleG.append("rect")
+    .attr("x", -LANE_TOGGLE_SIZE / 2).attr("y", -LANE_TOGGLE_SIZE / 2)
+    .attr("width", LANE_TOGGLE_SIZE).attr("height", LANE_TOGGLE_SIZE)
+    .attr("rx", 3)
+    .attr("fill", isExpanded ? rgba(laneColor, 0.18) : "rgba(255,255,255,0.94)")
+    .attr("stroke", rgba(laneColor, 0.75))
+    .attr("stroke-width", 1.1);
+  // Horizontal bar of the +/− glyph.
+  toggleG.append("line")
+    .attr("x1", -3.2).attr("x2", 3.2).attr("y1", 0).attr("y2", 0)
+    .attr("stroke", laneColor).attr("stroke-width", 1.5).attr("stroke-linecap", "round");
+  // Vertical bar — drawn only when collapsed, turning the glyph into "+".
+  if (!isExpanded) {
+    toggleG.append("line")
+      .attr("x1", 0).attr("x2", 0).attr("y1", -3.2).attr("y2", 3.2)
+      .attr("stroke", laneColor).attr("stroke-width", 1.5).attr("stroke-linecap", "round");
+  }
 
   lLabels.append("text")
-    .attr("x", DETAIL_PAD_X + 6).attr("y", lane.y + 3)
+    .attr("x", lane.x + LANE_LABEL_DX).attr("y", lane.y + 3)
     .attr("font-family", "JetBrains Mono, monospace").attr("font-size", "10px").attr("font-weight", "600")
-    .attr("fill", bandColor)
-    .text(ellipsis(lane.entityLabel, 30));
+    .attr("fill", laneColor)
+    .text(ellipsis(lane.entityLabel, 28));
 
   lLabels.append("text")
     .attr("x", TIMELINE_X0 - 38).attr("y", lane.y + 3)
@@ -229,7 +288,7 @@ function _drawLane(lane, bandColor, lBg, lMeta, lDfItem, lNodes, lLabels, cb) {
 
   lNodes.append("circle")
     .attr("cx", lane.relationPortX).attr("cy", lane.y).attr("r", 4.8)
-    .attr("fill", markerFill).attr("stroke", bandColor).attr("stroke-width", 1.3)
+    .attr("fill", markerFill).attr("stroke", laneColor).attr("stroke-width", 1.3)
     .style("cursor", "pointer")
     .on("click", ev => {
       ev.stopPropagation();
@@ -254,7 +313,7 @@ function _drawLane(lane, bandColor, lBg, lMeta, lDfItem, lNodes, lLabels, cb) {
     .attr("data-target-id", d => d.target_event_id)
     .attr("d", d => `M${d.x1},${d.y1} Q${d.cx},${d.cy} ${d.x2},${d.y2}`)
     .attr("fill", "none")
-    .attr("stroke", d => d.isBottleneck ? "#b45309" : rgba(bandColor, 0.92))
+    .attr("stroke", d => d.isBottleneck ? "#b45309" : rgba(laneColor, 0.92))
     .attr("stroke-width", d => d.isBottleneck ? 3.6 : 2.2)
     .attr("stroke-dasharray", null)
     .attr("stroke-linecap", "round")
@@ -292,11 +351,103 @@ function _drawLane(lane, bandColor, lBg, lMeta, lDfItem, lNodes, lLabels, cb) {
     .on("mouseleave", cb.onTooltipHide);
 
   markers.append("circle")
-    .attr("r", d => (d.anchor?.isSharedEvent ? LANE_MARKER_R + 1.8 : LANE_MARKER_R))
-    .attr("fill", d => d.anchor?.activityColor ?? bandColor)
+    .attr("r", d => _laneMarkerRadius(d.anchor, scope))
+    .attr("fill", d => d.anchor?.activityColor ?? laneColor)
     .attr("stroke", "rgba(255,255,255,0.94)")
     .attr("stroke-width", d => d.anchor?.isSharedEvent ? 1.9 : 1.2)
     .attr("class", "lane-marker-circle");
+
+  if (isExpanded) {
+    _drawLaneExpansion(lane, laneColor, lNodes, cb);
+  }
+}
+
+// Renders the per-entity event details table inside a foreignObject so it
+// participates in zoom/pan with the rest of the canvas. The layout has
+// already reserved vertical space via lane.expansion.tableHeight, so this
+// function only fills it.
+function _drawLaneExpansion(lane, laneColor, lNodes, cb) {
+  const rows = cb.getEntityRows?.(lane.entity_id) ?? [];
+  const exp = lane.expansion;
+  const fo = lNodes.append("foreignObject")
+    .attr("class", "lane-expanded-fo")
+    .attr("data-entity-id", lane.entity_id)
+    .attr("x", lane.x + 4)
+    .attr("y", exp.tableY)
+    .attr("width", Math.max(lane.width - 8, 240))
+    .attr("height", exp.tableHeight);
+
+  const wrap = fo.append("xhtml:div")
+    .attr("class", "lane-expanded-table")
+    .style("border-left", `3px solid ${laneColor}`);
+
+  if (!rows.length) {
+    wrap.append("xhtml:div")
+      .attr("class", "lane-expanded-empty")
+      .text("No events in this slice.");
+    return;
+  }
+
+  const table = wrap.append("xhtml:table");
+  const thead = table.append("xhtml:thead").append("xhtml:tr");
+  ["Activity", "Timestamp", "Δ to next", "Bottleneck", "Sync", "Correlated entities"]
+    .forEach(label => thead.append("xhtml:th").text(label));
+  const tbody = table.append("xhtml:tbody");
+  rows.forEach(row => {
+    const tr = tbody.append("xhtml:tr");
+    tr.append("xhtml:td").attr("class", "let-activity").text(row.activity);
+    tr.append("xhtml:td").attr("class", "let-time").text(_formatTimestamp(row.date));
+    tr.append("xhtml:td")
+      .attr("class", "let-gap")
+      .text(Number.isFinite(row.dfGapHours) ? _formatHoursCell(row.dfGapHours) : "");
+    tr.append("xhtml:td")
+      .attr("class", "let-bottleneck" + (row.isBottleneck ? " let-bottleneck-yes" : ""))
+      .text(row.dfGapHours == null ? "—" : (row.isBottleneck ? "Yes" : "No"));
+    tr.append("xhtml:td").attr("class", "let-sync").text(String(row.syncDegree ?? 0));
+    const corrCell = tr.append("xhtml:td").attr("class", "let-corr");
+    if (row.syncDegree > 1) {
+      row.correlatedEntities.forEach((ent, idx) => {
+        if (idx > 0) corrCell.append("xhtml:span").attr("class", "let-corr-sep").text(", ");
+        const isSelf = ent.entity_id === lane.entity_id;
+        if (isSelf) {
+          corrCell.append("xhtml:span")
+            .attr("class", "tip-entity-link tip-entity-current")
+            .attr("title", "Current entity")
+            .text(ent.entity_label);
+        } else {
+          corrCell.append("xhtml:a")
+            .attr("class", "tip-entity-link")
+            .attr("href", `#/identify?entity=${encodeURIComponent(ent.entity_id)}`)
+            .attr("title", `Open ${ent.entity_label} (${ent.entity_type})`)
+            .text(ent.entity_label)
+            .on("click", ev => {
+              // Same behaviour as the existing hover-link path: navigate
+              // straight to T2 focused on the clicked entity.
+              ev.preventDefault();
+              ev.stopPropagation();
+              cb.onEntitySelect?.(ent.entity_id);
+            });
+        }
+      });
+    } else {
+      corrCell.text("—");
+    }
+  });
+}
+
+function _formatTimestamp(date) {
+  if (!(date instanceof Date) || Number.isNaN(date.getTime())) return "n/a";
+  return date.toLocaleString("en-GB", {
+    day: "2-digit", month: "short", year: "2-digit",
+    hour: "2-digit", minute: "2-digit",
+  });
+}
+
+function _formatHoursCell(hours) {
+  if (!Number.isFinite(hours)) return "";
+  if (hours < 1)   return `${(hours * 60).toFixed(0)} min`;
+  if (hours < 48)  return `${hours.toFixed(1)} h`;
+  return `${(hours / 24).toFixed(1)} d`;
 }
 
 function _eventTooltip(anchor) {

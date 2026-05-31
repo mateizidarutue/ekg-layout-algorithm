@@ -23,7 +23,7 @@ const SUPPORTING_TASKS = [
   {
     id: "T4", route: "explore", label: "Explore",
     tuple: "⟨Explore, Features⟩",
-    desc: "Find shared events where three or more entity lifecycles intersect — the synchronisation points that distinguish object-centric processes from flat event logs.",
+    desc: "Find shared events where multiple entity lifecycles intersect — the synchronisation points that distinguish object-centric processes from flat event logs. Raise the degree floor to focus on the most heavily-synchronised activities.",
   },
 ];
 

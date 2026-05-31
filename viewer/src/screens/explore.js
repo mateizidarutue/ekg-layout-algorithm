@@ -1,6 +1,7 @@
 "use strict";
 
 import { navigate } from "../router.js";
+import { binEventsByMonth } from "../data/store.js";
 
 function _esc(str) {
   return String(str ?? "").replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;");
@@ -40,146 +41,63 @@ function _barChart(items, { valueKey, labelKey, colorKey, secondaryKey, secondar
   </div>`;
 }
 
-function _entityBreadthChart(items, { maxItems = 8 } = {}) {
-  const rows = items.slice(0, maxItems);
-  if (!rows.length) return `<div class="t4-empty">No data available.</div>`;
-  const maxCount = Math.max(...rows.map(r => r.entityCount), 1);
-  return `<div class="t4-breadth-chart">
-    ${rows.map((row, i) => {
-      const arcPct = row.entityCount / maxCount;
-      const typesLabel = (row.entityTypes ?? []).join(" · ") || "n/a";
-      const dateLabel = _formatDate(row.timestamp);
-      return `
-        <div class="t4-breadth-row">
-          <div class="t4-breadth-count-wrap">
-            <svg class="t4-breadth-arc" viewBox="0 0 36 36" aria-hidden="true">
-              <circle cx="18" cy="18" r="15.9" fill="none" stroke="rgba(37,99,235,0.10)" stroke-width="3.2"/>
-              <circle cx="18" cy="18" r="15.9" fill="none" stroke="${_esc(row.color ?? "#2563eb")}"
-                stroke-width="3.2" stroke-dasharray="${(arcPct * 100).toFixed(1)} 100"
-                stroke-linecap="round" transform="rotate(-90 18 18)"/>
-            </svg>
-            <span class="t4-breadth-count" style="color:${_esc(row.color ?? "#2563eb")}">${row.entityCount}</span>
-          </div>
-          <div class="t4-breadth-info">
-            <span class="t4-breadth-activity">${_esc(row.activity)}</span>
-            <span class="t4-breadth-types">${_esc(typesLabel)}</span>
-            <span class="t4-breadth-date">${_esc(dateLabel)}</span>
-          </div>
-          <span class="t4-breadth-rank">#${i + 1}</span>
-        </div>`;
-    }).join("")}
-  </div>`;
+const _MONTHS_SHORT = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+const _MONTHS_LONG  = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+
+// Temporal context strip from year-month buckets ([{ key:"YYYY-MM", count }], sorted ascending).
+// Labels are parsed straight from the key (MMM YY) so they are deterministic, locale-independent,
+// and unique per distinct bucket — the year disambiguates repeated month names.
+// When `interactive`, each column carries data-month so callers can wire click-to-filter; the
+// `activeMonth` column is highlighted and reveals its count value.
+function _overTimeStrip(buckets, { title = "Shared events over time", activeMonth = null, interactive = false } = {}) {
+  if (!buckets?.length) return "";
+  const maxCount = Math.max(...buckets.map(b => b.count), 1);
+  return `
+    <div class="ec-timeline-wrap">
+      <div class="t4-list-header" style="margin-bottom:10px">
+        <span class="t4-list-title">${_esc(title)}</span>
+      </div>
+      <div class="ec-timeline">
+        ${buckets.map(({ key, count }) => {
+          const [year, month] = key.split("-");
+          const mi = Number(month) - 1;
+          const label     = `${_MONTHS_SHORT[mi] ?? month} ${year.slice(2)}`;
+          const fullLabel = `${_MONTHS_LONG[mi] ?? month} ${year}`;
+          const pct = Math.max(2, Math.round((count / maxCount) * 100));
+          const isActive = key === activeMonth;
+          const attrs = interactive ? ` role="button" tabindex="0" data-month="${_esc(key)}"` : "";
+          return `<div class="ec-tl-col${isActive ? " ec-tl-col--active" : ""}"${attrs}>
+            <div class="ec-tl-value">${count.toLocaleString()}</div>
+            <div class="ec-tl-bar-wrap">
+              <div class="ec-tl-bar" style="height:${pct}%" title="${count.toLocaleString()} events — ${_esc(fullLabel)}"></div>
+            </div>
+            <div class="ec-tl-label" title="${_esc(fullLabel)}">${_esc(label)}</div>
+          </div>`;
+        }).join("")}
+      </div>
+    </div>`;
 }
 
-function _typePairChart(items, { maxItems = 10 } = {}) {
-  const rows = items.slice(0, maxItems);
-  if (!rows.length) return `<div class="t4-empty">No data available.</div>`;
-  const maxEvents = Math.max(...rows.map(r => r.eventCount), 1);
-  const maxEntities = Math.max(...rows.map(r => r.entityCount), 1);
-  return `<div class="t4-pair-chart">
-    <div class="t4-pair-header">
-      <span class="t4-pair-col-label">Type pair</span>
-      <span class="t4-pair-col-label t4-pair-col-right">Events</span>
-      <span class="t4-pair-col-label t4-pair-col-right">Entities</span>
-    </div>
-    ${rows.map((row, i) => {
-      const eventPct = Math.max(3, Math.round((row.eventCount / maxEvents) * 100));
-      const entityPct = Math.max(3, Math.round((row.entityCount / maxEntities) * 100));
-      const [typeA, typeB] = row.pair.split(" -> ");
-      return `
-        <div class="t4-pair-row">
-          <span class="t4-pair-rank">${i + 1}</span>
-          <span class="t4-pair-label">
-            <span class="t4-pair-type">${_esc(typeA ?? row.pair)}</span>
-            <span class="t4-pair-arrow">↔</span>
-            <span class="t4-pair-type">${_esc(typeB ?? "")}</span>
-          </span>
-          <span class="t4-pair-bar-wrap">
-            <span class="t4-pair-bar t4-pair-bar--events" style="width:${eventPct}%" title="${row.eventCount} events"></span>
-            <span class="t4-pair-count">${row.eventCount.toLocaleString()}</span>
-          </span>
-          <span class="t4-pair-bar-wrap">
-            <span class="t4-pair-bar t4-pair-bar--entities" style="width:${entityPct}%" title="${row.entityCount} entities"></span>
-            <span class="t4-pair-count">${row.entityCount.toLocaleString()}</span>
-          </span>
-        </div>`;
-    }).join("")}
-  </div>`;
+// Wires click / keyboard activation on an interactive strip to a month-select callback.
+function _attachStripHandlers(host, onMonthSelect) {
+  if (!onMonthSelect) return;
+  host.querySelectorAll(".ec-tl-col[data-month]").forEach(col => {
+    const go = () => onMonthSelect(col.dataset.month);
+    col.addEventListener("click", go);
+    col.addEventListener("keydown", e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); go(); } });
+  });
 }
 
 // ── Main render functions ─────────────────────────────────────────────────────
 
-export function renderExploreList(hotspots, overview = null) {
+export function renderExploreList(hotspots, { degreeFloor = 2, onDegreeFloorChange = null, timeBuckets = [], activeMonth = null, onMonthSelect = null, clusterNavParams = null } = {}) {
   const host = document.getElementById("screen-host");
   if (!host) return;
-
-  const totalSharedEvents = overview?.totalSharedEvents ?? hotspots.reduce((s, h) => s + h.eventCount, 0);
-  const totalEntities     = overview?.totalSharedEntities ?? hotspots.reduce((s, h) => s + h.entityCount, 0);
-  const topSync           = hotspots.reduce((best, h) => Math.max(best, h.avgSyncDegree || 0), 0);
 
   host.innerHTML = `
     <div class="explore-screen">
 
-      <!-- Hero summary -->
-      <div class="t4-hero">
-        <div class="t4-hero-stat">
-          <span class="t4-hero-value">${hotspots.length.toLocaleString()}</span>
-          <span class="t4-hero-label">shared-event activities</span>
-        </div>
-        <div class="t4-hero-sep"></div>
-        <div class="t4-hero-stat">
-          <span class="t4-hero-value">${totalSharedEvents.toLocaleString()}</span>
-          <span class="t4-hero-label">shared events total</span>
-        </div>
-        <div class="t4-hero-sep"></div>
-        <div class="t4-hero-stat">
-          <span class="t4-hero-value">${topSync.toFixed(1)}</span>
-          <span class="t4-hero-label">max sync degree</span>
-        </div>
-      </div>
-
-      <!-- Three analytical panels -->
-      <div class="t4-panels">
-
-        <!-- Q1: Most common -->
-        <section class="t4-panel">
-          <div class="t4-panel-header">
-            <span class="t4-panel-badge">Q1</span>
-            <span class="t4-panel-title">Most frequent shared activities</span>
-          </div>
-          <p class="t4-panel-desc">Activities ranked by how many shared events they produced. Click a row to explore.</p>
-          ${_barChart(overview?.topActivities ?? hotspots.slice(0, 10), {
-            valueKey: "eventCount",
-            labelKey: "activity",
-            colorKey: "color",
-            secondaryKey: "entityCount",
-            secondaryLabel: "entities",
-            maxItems: 10,
-            onClickId: row => row.id,
-          })}
-        </section>
-
-        <!-- Q2: Most entities per event -->
-        <section class="t4-panel">
-          <div class="t4-panel-header">
-            <span class="t4-panel-badge">Q2</span>
-            <span class="t4-panel-title">Highest entity breadth</span>
-          </div>
-          <p class="t4-panel-desc">Individual events where the most distinct entity types co-participated simultaneously.</p>
-          ${_entityBreadthChart(overview?.topEntityEvents ?? [], { maxItems: 8 })}
-        </section>
-
-        <!-- Q3: Entity type pairs -->
-        <section class="t4-panel">
-          <div class="t4-panel-header">
-            <span class="t4-panel-badge">Q3</span>
-            <span class="t4-panel-title">Entity type co-participation</span>
-          </div>
-          <p class="t4-panel-desc">Which pairs of entity types appear together in shared events, by event count and entity reach.</p>
-          ${_typePairChart(overview?.topTypePairs ?? [], { maxItems: 10 })}
-        </section>
-
-      </div>
+      ${_overTimeStrip(timeBuckets, { title: "Shared events over time", activeMonth, interactive: Boolean(onMonthSelect) })}
 
       <!-- Full hotspot list -->
       <div class="t4-list-section">
@@ -187,9 +105,10 @@ export function renderExploreList(hotspots, overview = null) {
           <span class="t4-list-title">All shared-event clusters</span>
           <div class="t4-list-controls">
             <input type="text" id="explore-search" class="explore-search" placeholder="Search activity…" aria-label="Search activities" />
+            <input type="number" id="explore-degree-floor" class="explore-sort" min="2" step="1" value="${_esc(String(degreeFloor))}" title="Minimum sync degree" aria-label="Minimum sync degree" />
             <select id="explore-sort" class="explore-sort" aria-label="Sort">
-              <option value="frequency">Sort: frequency</option>
               <option value="syncStrength">Sort: sync degree</option>
+              <option value="frequency">Sort: frequency</option>
               <option value="recency">Sort: recency</option>
             </select>
           </div>
@@ -200,12 +119,6 @@ export function renderExploreList(hotspots, overview = null) {
     </div>
   `;
 
-  // Attach Q1 click handlers
-  host.querySelectorAll(".t4-bar-row--clickable[data-id]").forEach(row => {
-    row.addEventListener("click", () => navigate("explore", { cluster: row.dataset.id }));
-    row.addEventListener("keydown", e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); navigate("explore", { cluster: row.dataset.id }); } });
-  });
-
   function _renderRows(list) {
     const container = host.querySelector("#hotspot-list-container");
     if (!list.length) {
@@ -213,11 +126,16 @@ export function renderExploreList(hotspots, overview = null) {
       return;
     }
     const maxEvents = Math.max(...list.map(h => h.eventCount), 1);
-    container.innerHTML = list.map(h => `
+    container.innerHTML = list.map(h => {
+      // Graduated swatch: a higher average sync degree renders a larger dot.
+      // Refinement of the binary shared/single channel — base 10px (the CSS
+      // default), growing with degree above the floor of 2.
+      const swatchSize = (8 + Math.min(Math.max(h.avgSyncDegree - 2, 0), 5) * 1.6).toFixed(1);
+      return `
       <div class="hotspot-row" data-id="${_esc(h.id)}" role="button" tabindex="0">
         <div class="hotspot-main">
           <div class="hotspot-activity">
-            <span class="hotspot-swatch" style="background:${_esc(h.color)}"></span>
+            <span class="hotspot-swatch" style="background:${_esc(h.color)};width:${swatchSize}px;height:${swatchSize}px" title="Sync degree ${h.avgSyncDegree.toFixed(1)}"></span>
             ${_esc(h.activity)}
           </div>
           <div class="hotspot-pairs">
@@ -234,32 +152,49 @@ export function renderExploreList(hotspots, overview = null) {
           <div class="hotspot-count-label">shared events</div>
         </div>
       </div>
-    `).join("");
+    `;
+    }).join("");
 
     container.querySelectorAll(".hotspot-row").forEach(row => {
-      const go = () => navigate("explore", { cluster: row.dataset.id });
+      const go = () => navigate("explore", { cluster: row.dataset.id, ...(clusterNavParams ?? {}) });
       row.addEventListener("click", go);
       row.addEventListener("keydown", e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); go(); } });
     });
   }
 
   _renderRows([...hotspots]);
+  _attachStripHandlers(host, onMonthSelect);
 
   const searchInput = host.querySelector("#explore-search");
   const sortSelect  = host.querySelector("#explore-sort");
+  const floorInput  = host.querySelector("#explore-degree-floor");
 
   function _refilter() {
     const q    = searchInput.value.trim().toLowerCase();
     const sort = sortSelect.value;
     let filtered = hotspots.filter(h => !q || h.activity.toLowerCase().includes(q));
-    if (sort === "syncStrength") filtered.sort((a, b) => b.avgSyncDegree - a.avgSyncDegree);
-    else if (sort === "recency") filtered.sort((a, b) => (b.lastDate?.getTime() ?? 0) - (a.lastDate?.getTime() ?? 0));
-    else filtered.sort((a, b) => b.eventCount - a.eventCount || a.activity.localeCompare(b.activity));
+    if (sort === "recency") filtered.sort((a, b) => (b.lastDate?.getTime() ?? 0) - (a.lastDate?.getTime() ?? 0));
+    else if (sort === "frequency") filtered.sort((a, b) => b.eventCount - a.eventCount || a.activity.localeCompare(b.activity));
+    else filtered.sort(_bySyncDegree);
     _renderRows(filtered);
   }
 
   searchInput.addEventListener("input", _refilter);
   sortSelect.addEventListener("change", _refilter);
+  floorInput?.addEventListener("change", () => {
+    const next = Math.max(2, Math.floor(Number(floorInput.value) || 2));
+    floorInput.value = String(next);
+    onDegreeFloorChange?.(next);
+  });
+}
+
+// Deterministic ranking for the hotspot list: synchronization degree desc,
+// then participation frequency desc, then activity identifier asc. Same data
+// + same floor always yields the same order.
+function _bySyncDegree(a, b) {
+  return b.avgSyncDegree - a.avgSyncDegree
+    || b.eventCount - a.eventCount
+    || a.activity.localeCompare(b.activity);
 }
 
 export function renderExploreClusterDetail(graph) {
@@ -319,19 +254,12 @@ export function renderExploreClusterDetail(graph) {
         const lane = b.lanes.find(l => l.entity_id === id);
         if (lane) { label = lane.entityLabel ?? id; type = b.entityType; break; }
       }
-      return { label, type, count };
+      return { id, label, type, count };
     });
   const maxEntityCount = Math.max(...topEntities.map(r => r.count), 1);
 
-  // ── Temporal histogram (by month) ──────────────────────────────────────────
-  const monthMap = new Map();
-  events.forEach(e => {
-    if (!(e.date instanceof Date) || isNaN(e.date.getTime())) return;
-    const key = e.date.toISOString().slice(0, 7);
-    monthMap.set(key, (monthMap.get(key) ?? 0) + 1);
-  });
-  const sortedMonths  = [...monthMap.entries()].sort((a, b) => a[0].localeCompare(b[0]));
-  const maxMonthCount = Math.max(...sortedMonths.map(([, c]) => c), 1);
+  // ── Temporal histogram (by year-month) ─────────────────────────────────────
+  const monthBuckets = binEventsByMonth(events);
 
   host.innerHTML = `
     <div class="ec-screen">
@@ -376,14 +304,15 @@ export function renderExploreClusterDetail(graph) {
               const v = countDist[k];
               const pct = Math.max(4, Math.round((v / maxDistVal) * 100));
               return `<div class="ec-hist-col">
+                <div class="ec-hist-count">${v >= 1000 ? (v / 1000).toFixed(1) + "k" : v}</div>
                 <div class="ec-hist-bar-wrap">
-                  <div class="ec-hist-bar" style="height:${pct}%" title="${v.toLocaleString()} events with ${k} entities"></div>
+                  <div class="ec-hist-bar" style="height:${pct}%" title="${v.toLocaleString()} shared events with ${k} co-participating entities"></div>
                 </div>
                 <div class="ec-hist-label">${k}</div>
-                <div class="ec-hist-count">${v >= 1000 ? (v / 1000).toFixed(1) + "k" : v}</div>
               </div>`;
             }).join("") : `<div class="t4-empty">No data.</div>`}
           </div>
+          ${distKeys.length ? `<div class="ec-hist-axis-note"><span class="ec-hist-key ec-hist-key--events">bar value = shared events</span><span class="ec-hist-key ec-hist-key--entities">x-axis = co-participating entities</span></div>` : ""}
         </section>
 
         <section class="t4-panel">
@@ -424,7 +353,7 @@ export function renderExploreClusterDetail(graph) {
           <div class="t4-bar-chart">
             ${topEntities.length ? topEntities.map((row, i) => {
               const pct = Math.max(4, Math.round((row.count / maxEntityCount) * 100));
-              return `<div class="t4-bar-row">
+              return `<div class="t4-bar-row t4-bar-row--clickable" data-entity-id="${_esc(row.id)}" role="button" tabindex="0" title="Open ${_esc(row.label)} in the Lifecycle (Detail) view">
                 <span class="t4-bar-rank">${i + 1}</span>
                 <span class="t4-bar-swatch" style="background:#0891b2"></span>
                 <span class="t4-bar-label">${_esc(row.label)}<span class="t4-bar-type-tag">${_esc(row.type)}</span></span>
@@ -437,28 +366,17 @@ export function renderExploreClusterDetail(graph) {
 
       </div>
 
-      ${sortedMonths.length ? `
-      <div class="ec-timeline-wrap">
-        <div class="t4-list-header" style="margin-bottom:10px">
-          <span class="t4-list-title">Shared events over time</span>
-        </div>
-        <div class="ec-timeline">
-          ${sortedMonths.map(([month, count]) => {
-            const pct = Math.max(2, Math.round((count / maxMonthCount) * 100));
-            const label    = new Date(month + "-01").toLocaleDateString("en-GB", { month: "short" });
-            const fullLabel = new Date(month + "-01").toLocaleDateString("en-GB", { month: "long", year: "numeric" });
-            return `<div class="ec-tl-col">
-              <div class="ec-tl-bar-wrap">
-                <div class="ec-tl-bar" style="height:${pct}%" title="${count.toLocaleString()} events — ${_esc(fullLabel)}"></div>
-              </div>
-              <div class="ec-tl-label" title="${_esc(fullLabel)}">${_esc(label)}</div>
-            </div>`;
-          }).join("")}
-        </div>
-      </div>` : ""}
+      ${_overTimeStrip(monthBuckets, { title: "Shared events over time" })}
 
     </div>
   `;
+
+  // P4 "Most active entities" rows open the entity in the T2 Lifecycle (Detail) view.
+  host.querySelectorAll(".t4-bar-row--clickable[data-entity-id]").forEach(row => {
+    const go = () => navigate("identify", { entity: row.dataset.entityId });
+    row.addEventListener("click", go);
+    row.addEventListener("keydown", e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); go(); } });
+  });
 }
 
 export function updateHotspotSummary(hotspot) {

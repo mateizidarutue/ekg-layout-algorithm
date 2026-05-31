@@ -3271,180 +3271,6 @@ body[data-route="explore"]:not([data-explore-drilled="true"]) .screen-host {
   display: none; /* only show on wider panels */
 }
 
-/* Q2: Entity breadth chart */
-.t4-breadth-chart {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-
-.t4-breadth-row {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 6px 4px;
-  border-bottom: 1px solid rgba(148,163,184,0.10);
-}
-.t4-breadth-row:last-child { border-bottom: none; }
-
-.t4-breadth-count-wrap {
-  position: relative;
-  width: 42px;
-  height: 42px;
-  flex-shrink: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-
-.t4-breadth-arc {
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-}
-
-.t4-breadth-count {
-  font-family: 'JetBrains Mono', monospace;
-  font-size: 13px;
-  font-weight: 800;
-  position: relative;
-  z-index: 1;
-}
-
-.t4-breadth-info {
-  flex: 1;
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-
-.t4-breadth-activity {
-  font-size: 12px;
-  font-weight: 700;
-  color: var(--text);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.t4-breadth-types {
-  font-size: 10px;
-  color: var(--accent);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.t4-breadth-date {
-  font-size: 10px;
-  color: var(--text-muted);
-}
-
-.t4-breadth-rank {
-  font-family: 'JetBrains Mono', monospace;
-  font-size: 10px;
-  font-weight: 700;
-  color: var(--text-muted);
-  flex-shrink: 0;
-}
-
-/* Q3: Type pair chart */
-.t4-pair-chart {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-
-.t4-pair-header {
-  display: grid;
-  grid-template-columns: 18px minmax(0,1fr) 72px 72px;
-  gap: 8px;
-  padding: 0 6px 5px;
-  border-bottom: 1px solid rgba(148,163,184,0.16);
-  margin-bottom: 4px;
-}
-
-.t4-pair-col-label {
-  font-family: 'JetBrains Mono', monospace;
-  font-size: 9px;
-  font-weight: 700;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  color: var(--text-muted);
-}
-
-.t4-pair-col-right { text-align: right; }
-
-.t4-pair-row {
-  display: grid;
-  grid-template-columns: 18px minmax(0,1fr) 72px 72px;
-  align-items: center;
-  gap: 8px;
-  padding: 5px 6px;
-  border-radius: 7px;
-}
-.t4-pair-row:hover { background: rgba(148,163,184,0.07); }
-
-.t4-pair-rank {
-  font-family: 'JetBrains Mono', monospace;
-  font-size: 10px;
-  font-weight: 700;
-  color: var(--text-muted);
-  text-align: right;
-}
-
-.t4-pair-label {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  min-width: 0;
-  overflow: hidden;
-}
-
-.t4-pair-type {
-  font-size: 11px;
-  font-weight: 600;
-  color: var(--text);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.t4-pair-arrow {
-  font-size: 10px;
-  color: var(--text-muted);
-  flex-shrink: 0;
-}
-
-.t4-pair-bar-wrap {
-  display: flex;
-  align-items: center;
-  gap: 5px;
-  justify-content: flex-end;
-}
-
-.t4-pair-bar {
-  display: block;
-  height: 6px;
-  border-radius: 999px;
-  min-width: 3px;
-  max-width: 48px;
-}
-
-.t4-pair-bar--events   { background: rgba(37,99,235,0.70); }
-.t4-pair-bar--entities { background: rgba(124,58,237,0.60); }
-
-.t4-pair-count {
-  font-family: 'JetBrains Mono', monospace;
-  font-size: 10px;
-  font-weight: 700;
-  color: var(--text);
-  min-width: 24px;
-  text-align: right;
-}
-
 /* Full list section */
 .t4-list-section {
   display: flex;
@@ -3661,6 +3487,17 @@ body[data-route="explore"]:not([data-explore-drilled="true"]) .screen-host {
 .compare-result-row:last-child { border-bottom: none; }
 .compare-result-row:hover { background: rgba(37,99,235,0.06); }
 
+/* Variant-mode picker: turn the dropdown into an inline panel so the list of
+   remaining variant members is always visible (no typeahead floating). */
+.compare-add-wrap.variant-picker .compare-add-results {
+  position: static;
+  margin-top: 6px;
+  max-height: 220px;
+  overflow-y: auto;
+  box-shadow: none;
+}
+.compare-add-wrap.variant-picker .compare-add-results.hidden { display: block; }
+
 .compare-result-label {
   font-family: 'JetBrains Mono', monospace;
   font-size: 11px;
@@ -3729,6 +3566,7 @@ body[data-route="explore"]:not([data-explore-drilled="true"]) .screen-host {
 }
 .ec-hist-bar:hover { opacity: 0.8; }
 
+/* x-axis tick: number of co-participating entities (the bucket). */
 .ec-hist-label {
   font-family: 'JetBrains Mono', monospace;
   font-size: 9px;
@@ -3738,12 +3576,34 @@ body[data-route="explore"]:not([data-explore-drilled="true"]) .screen-host {
   text-align: center;
 }
 
+/* on-bar value: number of shared events (the bar magnitude). */
 .ec-hist-count {
   font-family: 'JetBrains Mono', monospace;
-  font-size: 8px;
-  color: var(--text-muted, #94a3b8);
+  font-size: 9px;
+  font-weight: 700;
+  color: #2563eb;
+  margin-bottom: 3px;
   text-align: center;
 }
+
+.ec-hist-axis-note {
+  display: flex;
+  justify-content: center;
+  gap: 16px;
+  margin-top: 10px;
+  font-size: 9px;
+  color: var(--text-muted, #94a3b8);
+}
+.ec-hist-key { display: inline-flex; align-items: center; gap: 5px; }
+.ec-hist-key::before {
+  content: "";
+  width: 9px;
+  height: 9px;
+  border-radius: 2px;
+  flex-shrink: 0;
+}
+.ec-hist-key--events::before   { background: #2563eb; }
+.ec-hist-key--entities::before { background: var(--text-dim, #64748b); }
 
 /* Temporal histogram ─────────────────────────────────────────────────────── */
 .ec-timeline-wrap {
@@ -3787,6 +3647,28 @@ body[data-route="explore"]:not([data-explore-drilled="true"]) .screen-host {
   transition: opacity 0.15s;
 }
 .ec-tl-bar:hover { opacity: 0.75; }
+
+/* Count value: reserved row, revealed only on the active (pressed) column. */
+.ec-tl-value {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 8px;
+  font-weight: 700;
+  line-height: 11px;
+  height: 11px;
+  color: #d97706;
+  white-space: nowrap;
+  opacity: 0;
+  pointer-events: none;
+}
+.ec-tl-col--active .ec-tl-value { opacity: 1; }
+
+/* Interactive strip columns (dataset-level list strip). */
+.ec-tl-col[data-month] { cursor: pointer; }
+.ec-tl-col[data-month]:hover .ec-tl-bar { opacity: 0.75; }
+.ec-tl-col--active .ec-tl-bar {
+  background: linear-gradient(180deg, #fbbf24 0%, #d97706 100%);
+}
+.ec-tl-col--active .ec-tl-label { color: #d97706; font-weight: 700; }
 
 .ec-tl-label {
   font-family: 'JetBrains Mono', monospace;
@@ -4748,4 +4630,105 @@ body[data-route="explore"]:not([data-explore-drilled="true"]) .screen-host {
   background: var(--bg-soft, #f1f5f9);
   padding: 1px 6px;
   border-radius: 3px;
+}
+
+/* T2/T3 — per-lane expand/collapse toggle and details table.
+   Toggle is drawn in SVG (.lane-expand-toggle is a <g>); table is rendered
+   as HTML inside a <foreignObject> so it inherits the canvas zoom/pan. */
+.lane-expand-toggle:hover rect {
+  fill: rgba(37, 99, 235, 0.12);
+}
+.lane-expanded-fo {
+  overflow: visible;
+}
+.lane-expanded-table {
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 10px;
+  color: var(--text, #0f172a);
+  background: rgba(248, 250, 252, 0.96);
+  border: 1px solid rgba(148, 163, 184, 0.32);
+  border-radius: 8px;
+  padding: 2px 8px 4px;
+  height: 100%;
+  box-sizing: border-box;
+  overflow: auto;
+}
+.lane-expanded-table table {
+  width: 100%;
+  border-collapse: collapse;
+}
+.lane-expanded-table thead th {
+  position: sticky;
+  top: 0;
+  text-align: left;
+  font-weight: 700;
+  font-size: 9px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--text-dim, #6b7280);
+  background: rgba(248, 250, 252, 0.98);
+  padding: 4px 8px 3px 0;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.32);
+  white-space: nowrap;
+  z-index: 1;
+}
+.lane-expanded-table tbody td {
+  padding: 2px 8px 2px 0;
+  vertical-align: middle;
+  border-bottom: 1px dashed rgba(148, 163, 184, 0.18);
+  line-height: 1.35;
+}
+.lane-expanded-table tbody tr:last-child td {
+  border-bottom: none;
+}
+.lane-expanded-table .let-activity {
+  font-weight: 600;
+  color: var(--text, #0f172a);
+  white-space: nowrap;
+}
+.lane-expanded-table .let-time,
+.lane-expanded-table .let-gap,
+.lane-expanded-table .let-sync {
+  color: var(--text-dim, #6b7280);
+  white-space: nowrap;
+}
+.lane-expanded-table .let-bottleneck {
+  color: var(--text-dim, #6b7280);
+  font-weight: 600;
+}
+.lane-expanded-table .let-bottleneck-yes {
+  color: #b45309; /* same accent as df-link-bottleneck on the canvas */
+}
+.lane-expanded-table .let-corr {
+  line-height: 1.6;
+}
+.lane-expanded-table .let-corr .tip-entity-link {
+  padding: 1px 4px;
+  font-size: 10px;
+}
+.lane-expanded-table .let-corr-sep {
+  color: var(--text-dim, #6b7280);
+  margin: 0 2px;
+}
+.lane-expanded-empty {
+  color: var(--text-dim, #6b7280);
+  font-size: 10.5px;
+  padding: 4px 6px;
+}
+
+/* Sidebar collapse — the toggle in the topbar shows one of two icons
+   depending on the current state, set on <body> via .sidebar-collapsed. */
+.topbar-sidebar-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 6px 8px;
+}
+.topbar-sidebar-toggle .icon-sidebar-expand { display: none; }
+body.sidebar-collapsed .topbar-sidebar-toggle .icon-sidebar-collapse { display: none; }
+body.sidebar-collapsed .topbar-sidebar-toggle .icon-sidebar-expand { display: inline; }
+
+body.sidebar-collapsed #sidebar,
+body.sidebar-collapsed #sidebar-resizer {
+  display: none;
 }

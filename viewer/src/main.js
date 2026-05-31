@@ -3,7 +3,8 @@
 import { loadDataset, loadManifest, datasetUrl, datasetFromQuery } from "./data/loader.js";
 import {
   buildStore, getStore, getVariantOverview, getEkgView,
-  getActivityDfGraph, getDetailGraph, getGlobalSharedEventHotspots, getSharedEventOverview, getEntitiesForHotspot,
+  getActivityDfGraph, getDetailGraph, getGlobalSharedEventHotspots, getSharedEventTimeBuckets, getEntitiesForHotspot,
+  buildEntityTimelineRows,
 } from "./data/store.js";
 import { computeDetailLayout } from "./layout/detailLayout.js";
 import { computeVariantLayout, computeDfGraphLayout } from "./layout/overviewLayout.js";
@@ -46,10 +47,30 @@ let _keyboardCameraLastTs = 0;
 let _minZoomScale = ZOOM_MIN_SCALE;
 let _clusterActivityContext = null;
 let _isolatedClusterContext = null;
+// T4-only display filter: minimum synchronization degree a shared event must
+// have to appear in the hotspot list. Does NOT change the shared-event
+// definition (>=2) anywhere else in the tool. Minimum allowed value is 2.
+let _t4DegreeFloor = 2;
+// T4-list-only month filter: when set to a "YYYY-MM" key (by clicking a bar in
+// the temporal strip), the hotspot list is narrowed to that month. The strip
+// itself always shows the full range so the selection stays visible. Reset on
+// fresh entry to the list route.
+let _t4SelectedMonth = null;
 let _compareEntityIds = [];
 let _compareMode = "variants";
 let _accentMap = {};
 let _selectionRaf = null;
+// Entities whose per-event details table is currently expanded under their
+// lane. Survives slice/window changes (so the bottleneck column updates
+// live as the threshold re-scopes) but is cleared on dataset reload and
+// on T2 anchor switch (see _afterLoad and handleRoute).
+let _expandedEntityIds = new Set();
+// Row cache for the currently-laid-out detail graph, keyed by entity_id.
+// Populated just before computeDetailLayout runs so the layout can ask for
+// row counts (to size the expansion gap) and the renderer can pull the
+// same rows when drawing the table. Rebuilt every re-render.
+let _laneRowCache = new Map();
+let _lastDetailAnchorId = null;
 const ACCENT_COLORS = ["#7c3aed", "#ea580c", "#059669", "#dc2626", "#0891b2"];
 let _filters = {
   activities: null,
@@ -92,6 +113,7 @@ async function init() {
   _setupEdgeControls();
   _setupCanvasKeyboard();
   _setupSidebarResize();
+  _setupSidebarToggle();
   _renderLegend();
   _setupTopbar();
   window.addEventListener("resize", _handleResize);
@@ -136,6 +158,9 @@ function _afterLoad(store, name) {
   _selection = null;
   _entitySearchQuery = "";
   _lastListKey = null;
+  _expandedEntityIds = new Set();
+  _laneRowCache = new Map();
+  _lastDetailAnchorId = null;
 
   document.getElementById("dataset-label").textContent = name.toUpperCase();
   document.getElementById("topbar-dataset-name").textContent = name.toUpperCase();
@@ -234,7 +259,14 @@ function _renderLayers(route, store) {
         dateTo,
       });
       const renderGraph = _resolveDetailRenderGraph(_detailGraph);
-      const layout = computeDetailLayout(renderGraph, w);
+      // Anchor change clears expansion state — a different entity's table
+      // would never make sense under the previous entity's lanes.
+      if (_lastDetailAnchorId !== entityId) {
+        _expandedEntityIds = new Set();
+        _lastDetailAnchorId = entityId;
+      }
+      const layoutOpts = _prepareLaneRowCache(renderGraph);
+      const layout = computeDetailLayout(renderGraph, w, layoutOpts);
       drawDetailView(layout, lBg, lMeta, lRel, lCorr, lMeta, lDf, lNodes, lLabels, vis, cb);
       _lastTotalHeight = layout.totalHeight;
       _cacheTimeAxis(layout);
@@ -289,9 +321,39 @@ function _renderLayers(route, store) {
       if (clusterId) {
         _renderExploreDetail(route, store, w, lBg, lMeta, lRel, lCorr, lDf, lNodes, lLabels, cb, clusterId, exploreFrom, exploreTo);
       } else {
-        const hotspots = getGlobalSharedEventHotspots({ activities: _filters.activities, minSharedEntities: 3, dateFrom: exploreFrom, dateTo: exploreTo });
-        const sharedOverview = getSharedEventOverview({ activities: _filters.activities, limit: 10, minSharedEntities: 3, dateFrom: exploreFrom, dateTo: exploreTo });
-        renderExploreList(hotspots, sharedOverview);
+        // Fresh entry to the list clears any prior month selection so the user
+        // always lands on the full, unfiltered list.
+        _t4SelectedMonth = null;
+        // Dataset-level temporal context strip: always degree >= 2, independent of the
+        // display floor and the month selection, so it stays fixed (all months visible)
+        // as the user steps the floor or picks a month. Computed once.
+        const timeBuckets = getSharedEventTimeBuckets({ activities: _filters.activities, dateFrom: exploreFrom, dateTo: exploreTo });
+        const renderList = () => {
+          const floor = Math.max(2, _t4DegreeFloor);
+          // The month selection narrows only the list, intersected with any base
+          // window carried in from T1.
+          let listFrom = exploreFrom, listTo = exploreTo;
+          if (_t4SelectedMonth) {
+            const b = _monthBounds(_t4SelectedMonth);
+            listFrom = new Date(exploreFrom ? Math.max(exploreFrom.getTime(), b.from) : b.from);
+            listTo   = new Date(exploreTo   ? Math.min(exploreTo.getTime(),   b.to)   : b.to);
+          }
+          const hotspots = getGlobalSharedEventHotspots({ activities: _filters.activities, sortBy: "syncStrength", minSharedEntities: floor, dateFrom: listFrom, dateTo: listTo });
+          // Carry the effective list filter into a drilled-in cluster so the
+          // detail view stays scoped to the same window/month.
+          const clusterNavParams = {};
+          if (listFrom) clusterNavParams.dateFrom = String(listFrom.getTime());
+          if (listTo)   clusterNavParams.dateTo   = String(listTo.getTime());
+          renderExploreList(hotspots, {
+            degreeFloor: floor,
+            onDegreeFloorChange: next => { _t4DegreeFloor = Math.max(2, next); renderList(); },
+            timeBuckets,
+            activeMonth: _t4SelectedMonth,
+            onMonthSelect: key => { _t4SelectedMonth = _t4SelectedMonth === key ? null : key; renderList(); },
+            clusterNavParams,
+          });
+        };
+        renderList();
         updateSidebarRoute(route, { compareMode: _compareMode, exploreDrilled: false });
       }
       break;
@@ -388,8 +450,13 @@ function _renderCompareDetail(route, store, w, lBg, lMeta, lRel, lCorr, lDf, lNo
     dateTo,
     restrictedItemIds,
   });
-  const renderGraph = _resolveDetailRenderGraph(_detailGraph);
-  const layout = computeDetailLayout(renderGraph, w);
+  let renderGraph = _resolveDetailRenderGraph(_detailGraph);
+  if (variantContext) {
+    renderGraph = _regroupBandsByCase(renderGraph, entityIds);
+  }
+  _renderCompareAddPicker(variantContext, entityIds, store);
+  const layoutOpts = _prepareLaneRowCache(renderGraph);
+  const layout = computeDetailLayout(renderGraph, w, layoutOpts);
   drawDetailView(layout, lBg, lMeta, lRel, lCorr, lMeta, lDf, lNodes, lLabels, vis, cb);
   _lastTotalHeight = layout.totalHeight;
   _cacheTimeAxis(layout);
@@ -432,6 +499,129 @@ function _injectVariantScopeNote(variant, compareEntityIds) {
   `);
 }
 
+// In variant-driven compare, split the items band into one band per compared
+// case so each case (e.g., a PurchaseOrder) renders as its own section with
+// its own item lanes underneath, instead of all items being merged into one
+// shared items band.
+function _regroupBandsByCase(graph, orderedCaseIds) {
+  const caseType = graph?.caseType;
+  const itemType = graph?.itemType;
+  if (!caseType || !itemType) return graph;
+  const bands = graph.bands ?? [];
+  const caseBand = bands.find(b => b.entityType === caseType);
+  const itemBand = bands.find(b => b.entityType === itemType);
+  if (!caseBand || !itemBand) return graph;
+
+  const caseLaneById = Object.fromEntries((caseBand.lanes ?? []).map(l => [l.entity_id, l]));
+  const itemsByParent = new Map();
+  (itemBand.lanes ?? []).forEach(lane => {
+    const parent = lane.events?.[0]?.case_entity_id ?? lane.parentCaseId ?? null;
+    if (!parent) return;
+    if (!itemsByParent.has(parent)) itemsByParent.set(parent, []);
+    itemsByParent.get(parent).push(lane);
+  });
+
+  const otherBands = bands.filter(b => b !== caseBand && b !== itemBand);
+  const perCaseBands = [];
+  orderedCaseIds.forEach(caseId => {
+    const caseLane = caseLaneById[caseId];
+    if (!caseLane) return;
+    const itemLanes = itemsByParent.get(caseId) ?? [];
+    const label = caseLane.entityLabel || caseId;
+    perCaseBands.push({
+      ...caseBand,
+      entityType: caseType,
+      entityLabel: `${caseType} ${label}`,
+      lanes: [caseLane, ...itemLanes],
+      parentGroupBreaks: [],
+      compareEntityIds: [caseId],
+      dominantSequence: null,
+      dominantSupport: 0,
+      comparedSequenceCount: 0,
+      hasDominantPattern: false,
+    });
+  });
+  if (!perCaseBands.length) return graph;
+  return { ...graph, bands: [...perCaseBands, ...otherBands] };
+}
+
+// Variant-mode state for the compare picker. When set, the input in the
+// "Compared entities" panel filters this list of members instead of searching
+// the whole store. The free-text search behaviour in _wireSidebar checks
+// _variantPickerMembers === null before falling back to global search.
+let _variantPickerMembers = null;
+
+// Variant-mode replacement for the free-text entity search: show a curated
+// list of the variant's other members and let the user filter that list
+// rather than searching the whole dataset.
+function _renderCompareAddPicker(variantContext, entityIds, store) {
+  const wrap = document.getElementById("compare-add-wrap");
+  const input = document.getElementById("compare-add-input");
+  const results = document.getElementById("compare-add-results");
+  if (!wrap || !input || !results) return;
+
+  if (!variantContext) {
+    _variantPickerMembers = null;
+    wrap.classList.remove("variant-picker");
+    input.removeAttribute("data-variant-mode");
+    input.placeholder = "Type entity ID to add…";
+    input.disabled = false;
+    results.classList.add("hidden");
+    results.innerHTML = "";
+    return;
+  }
+
+  const existing = new Set(entityIds);
+  const remaining = (variantContext.members ?? []).filter(m => !existing.has(m.id));
+  _variantPickerMembers = { members: remaining, itemType: store?.itemType ?? "" };
+  wrap.classList.add("variant-picker");
+  input.setAttribute("data-variant-mode", "1");
+  input.value = "";
+  input.placeholder = remaining.length
+    ? `Filter ${remaining.length} remaining variant member${remaining.length === 1 ? "" : "s"}…`
+    : "All variant members already compared";
+  input.disabled = !remaining.length;
+  _renderVariantPickerResults("");
+}
+
+function _renderVariantPickerResults(filterText) {
+  const results = document.getElementById("compare-add-results");
+  if (!results || !_variantPickerMembers) return;
+  const { members, itemType } = _variantPickerMembers;
+  const q = (filterText ?? "").trim().toLowerCase();
+  const hits = q
+    ? members.filter(m => String(m.id).toLowerCase().includes(q) || String(m.label ?? "").toLowerCase().includes(q))
+    : members;
+  if (!hits.length) {
+    results.innerHTML = `<div class="empty-note" style="padding:8px 10px;font-size:11px;color:var(--text-dim)">${members.length ? "No matches." : "No remaining members."}</div>`;
+  } else {
+    results.innerHTML = hits.map(m => {
+      const sub = `${m.itemCount ?? 0} ${itemType.toLowerCase()} - ${m.eventCount ?? 0} events`;
+      return `<div class="compare-result-row" data-id="${_escAttr(m.id)}"><span class="compare-result-label">${_escHtml(m.label ?? m.id)}</span><span class="compare-result-type">${_escHtml(sub)}</span></div>`;
+    }).join("");
+    results.querySelectorAll(".compare-result-row").forEach(row => {
+      row.addEventListener("mousedown", ev => ev.preventDefault());
+      row.addEventListener("click", () => {
+        const r = getRoute();
+        const cur = (r.params.entities ?? "").split(",").filter(Boolean);
+        if (!cur.includes(row.dataset.id)) {
+          const params = { entities: [...cur, row.dataset.id].join(",") };
+          if (r.params.variant) params.variant = r.params.variant;
+          navigate("compare", params);
+        }
+      });
+    });
+  }
+  results.classList.remove("hidden");
+}
+
+// UTC epoch-ms bounds for a "YYYY-MM" month key. Matches binEventsByMonth's UTC
+// bucketing so a month filter selects exactly the events in that strip bar.
+function _monthBounds(monthKey) {
+  const [y, m] = monthKey.split("-").map(Number);
+  return { from: Date.UTC(y, m - 1, 1), to: Date.UTC(y, m, 1) - 1 };
+}
+
 function _renderExploreDetail(route, store, w, lBg, lMeta, lRel, lCorr, lDf, lNodes, lLabels, cb, clusterId, dateFrom = null, dateTo = null) {
   _updateDetailPanels(null);
   // focusType is carried from T1 when the user drills in from a focused type.
@@ -456,7 +646,10 @@ function _renderExploreDetail(route, store, w, lBg, lMeta, lRel, lCorr, lDf, lNo
     activities: _effectiveDetailActivities(),
     maxEntitiesPerType,
     sharedOnly: true,
-    minSharedEntities: 3,
+    // Shared-event definition: correlated to >=2 entities. The T4 list's
+    // degree-floor control does not apply here — the cluster detail always
+    // shows every shared event for the activity.
+    minSharedEntities: 2,
     // Date filter carried from T1 — filters which events appear in the
     // lifecycle timelines so only in-window events are shown.
     dateFrom,
@@ -470,7 +663,7 @@ function _renderExploreDetail(route, store, w, lBg, lMeta, lRel, lCorr, lDf, lNo
 
   // Use the same date filter when looking up the hotspot summary so
   // the event count shown in the header reflects the filtered window.
-  const hotspots = getGlobalSharedEventHotspots({ minSharedEntities: 3, dateFrom, dateTo });
+  const hotspots = getGlobalSharedEventHotspots({ minSharedEntities: 2, dateFrom, dateTo });
   const hotspot = hotspots.find(h => h.id === clusterId);
   if (hotspot) updateHotspotSummary(hotspot);
 }
@@ -505,6 +698,28 @@ function _highlightFocusedCluster(clusterId) {
   });
 }
 
+// Rebuild the per-lane row cache for the currently-rendering detail graph
+// and hand back the matching layout options. The cache is keyed by
+// entity_id so the layout can ask for row counts (to size the expansion
+// gap) and the renderer can pull the exact same rows when drawing the
+// table — guaranteeing the bottleneck flag in the table and the bottleneck
+// halo on the canvas can't drift apart.
+function _prepareLaneRowCache(renderGraph) {
+  _laneRowCache = new Map();
+  const store = (() => { try { return getStore(); } catch { return null; } })();
+  const eventById = store?.eventById ?? {};
+  (renderGraph?.bands ?? []).forEach(band => {
+    (band.lanes ?? []).forEach(lane => {
+      if (!_expandedEntityIds.has(lane.entity_id)) return;
+      _laneRowCache.set(lane.entity_id, buildEntityTimelineRows(lane, eventById));
+    });
+  });
+  return {
+    expandedEntityIds: _expandedEntityIds,
+    getRowCountForEntity: id => _laneRowCache.get(id)?.length ?? 0,
+  };
+}
+
 // ── Callbacks for renderers ───────────────────────────────────────────────────
 function _makeCallbacks(route) {
   return {
@@ -537,6 +752,17 @@ function _makeCallbacks(route) {
       kind: "edge", edgeId: d.edgeId, entityId: d.entityId,
       sourceId: d.sourceId, targetId: d.targetId,
     }),
+    onLaneExpansionToggle: entityId => {
+      if (!entityId) return;
+      if (_expandedEntityIds.has(entityId)) _expandedEntityIds.delete(entityId);
+      else _expandedEntityIds.add(entityId);
+      handleRoute(getRoute());
+    },
+    // Renderer pulls the rows from the cache that was populated by
+    // _prepareLaneRowCache before computeDetailLayout ran, so the table
+    // and the layout's reserved gap always agree on row count.
+    getEntityRows: entityId => _laneRowCache.get(entityId) ?? [],
+    isEntityExpanded: entityId => _expandedEntityIds.has(entityId),
   };
 }
 
@@ -773,8 +999,13 @@ function _showTooltip(html, x, y) {
 
   const tipW = tip.offsetWidth || 240;
   const tipH = tip.offsetHeight || 100;
-  const left = coords.x + tipW + 16 > wrapW ? coords.x - tipW - 10 : coords.x + 14;
-  const top  = coords.y + tipH + 16 > wrapH ? coords.y - tipH - 10 : coords.y + 14;
+  // coords are relative to the visible viewport of canvas-wrap, but the
+  // tooltip is an absolutely-positioned child that scrolls with the canvas
+  // content. Add the scroll offset so it lands next to the cursor instead of
+  // near the top of the (scrolled-away) content origin. The flip-to-other-side
+  // decisions stay in visible-viewport space.
+  const left = (coords.x + tipW + 16 > wrapW ? coords.x - tipW - 10 : coords.x + 14) + wrap.scrollLeft;
+  const top  = (coords.y + tipH + 16 > wrapH ? coords.y - tipH - 10 : coords.y + 14) + wrap.scrollTop;
   tip.style.left = `${left}px`;
   tip.style.top  = `${top}px`;
   tip.classList.add("show");
@@ -855,6 +1086,13 @@ function _setupEdgeControls() {
   const compareInput = document.getElementById("compare-add-input");
   const compareResults = document.getElementById("compare-add-results");
   compareInput?.addEventListener("input", () => {
+    // Variant-driven compare: the picker is restricted to the variant's
+    // remaining members; filter that curated list instead of searching the
+    // whole store. See _renderCompareAddPicker.
+    if (_variantPickerMembers) {
+      _renderVariantPickerResults(compareInput.value);
+      return;
+    }
     const q = compareInput.value.trim().toLowerCase();
     if (!q) { compareResults.classList.add("hidden"); return; }
     let store;
@@ -882,6 +1120,9 @@ function _setupEdgeControls() {
     compareResults.classList.remove("hidden");
   });
   compareInput?.addEventListener("blur", () => {
+    // Keep the variant member list visible — it's an always-on picker, not a
+    // typeahead dropdown.
+    if (_variantPickerMembers) return;
     setTimeout(() => compareResults?.classList.add("hidden"), 160);
   });
 }
@@ -1893,6 +2134,28 @@ function _setDocumentCanvas(totalHeight, options = {}) {
   if (options.scrollTop) {
     wrap.scrollTo({ left: 0, top: 0, behavior: "auto" });
   }
+}
+
+// ── Sidebar collapse toggle ───────────────────────────────────────────────────
+// The CSS hides #sidebar and #sidebar-resizer when <body> carries the
+// .sidebar-collapsed class. The canvas re-fits to its new width on each
+// toggle by re-running the current route (same path used by the resize
+// drag handler), so layouts that depend on viewport width recompute.
+function _setupSidebarToggle() {
+  const btn = document.getElementById("btn-sidebar-toggle");
+  if (!btn) return;
+  const sync = () => {
+    const collapsed = document.body.classList.contains("sidebar-collapsed");
+    btn.setAttribute("aria-pressed", collapsed ? "true" : "false");
+    btn.setAttribute("aria-label", collapsed ? "Show sidebar" : "Hide sidebar");
+    btn.setAttribute("title", collapsed ? "Show sidebar" : "Hide sidebar");
+  };
+  sync();
+  btn.addEventListener("click", () => {
+    document.body.classList.toggle("sidebar-collapsed");
+    sync();
+    handleRoute(getRoute());
+  });
 }
 
 // ── Sidebar resize ────────────────────────────────────────────────────────────

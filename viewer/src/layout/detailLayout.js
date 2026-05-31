@@ -46,7 +46,27 @@ const SHARED_CLUSTER_CLEARANCE = LAYOUT_CONFIG.shared.clearance;
 const SHARED_CLUSTER_LANE_GAP  = LAYOUT_CONFIG.shared.laneGap;
 const HEADER_RESERVED_H        = LAYOUT_CONFIG.header.reservedH;
 
-export function computeDetailLayout(graph, width) {
+// Per-lane expansion table geometry. The table itself is rendered as a
+// foreignObject in the detail renderer; the layout's only job is to leave
+// room for it so subsequent lanes / bands shift down. Keep these in sync
+// with the CSS in style.css (.lane-expanded-table).
+export const LANE_TABLE_PAD_TOP    = 6;
+export const LANE_TABLE_PAD_BOTTOM = 8;
+export const LANE_TABLE_HEADER_H   = 22;
+export const LANE_TABLE_ROW_H      = 20;
+export const LANE_TABLE_EMPTY_H    = 28; // fallback height when an entity has zero rows
+// Cap how many rows of body the reserved layout space shows. Longer event
+// sequences scroll inside the table wrapper rather than pushing the rest
+// of the canvas further down.
+export const LANE_TABLE_MAX_VISIBLE_ROWS = 5;
+
+export function computeDetailLayout(graph, width, options = {}) {
+  const expandedEntityIds = options.expandedEntityIds instanceof Set
+    ? options.expandedEntityIds
+    : new Set(options.expandedEntityIds ?? []);
+  const getRowCountForEntity = typeof options.getRowCountForEntity === "function"
+    ? options.getRowCountForEntity
+    : null;
   const totalWidth = Math.max(width - 18, TIMELINE_X0 + 420);
   const bandX = 18;
   const bandWidth = Math.max(totalWidth - bandX - 20, 420);
@@ -117,7 +137,33 @@ export function computeDetailLayout(graph, width) {
         cumulativeOffset += PARENT_GROUP_GAP;
       }
       if (!isOwnParent) prevParent = myParent;
-      const y = bandTop + BAND_HEADER_H + laneIndex * LANE_H + cumulativeOffset + LANE_H / 2;
+      const laneTop = bandTop + BAND_HEADER_H + laneIndex * LANE_H + cumulativeOffset;
+      const y = laneTop + LANE_H / 2;
+      // If this lane is expanded, reserve vertical space for its details
+      // table immediately below it and shift every subsequent lane (and
+      // every subsequent band, via bandHeight below) down by that amount.
+      let expansion = null;
+      if (expandedEntityIds.has(lane.entity_id)) {
+        const rowCount = getRowCountForEntity ? Math.max(0, getRowCountForEntity(lane.entity_id) | 0) : 0;
+        // Cap the reserved layout space; the inner scrollable wrapper
+        // handles overflow so the canvas doesn't grow with sequence length.
+        const visibleRows = rowCount > 0
+          ? Math.min(rowCount, LANE_TABLE_MAX_VISIBLE_ROWS)
+          : 0;
+        const bodyH = visibleRows > 0
+          ? visibleRows * LANE_TABLE_ROW_H
+          : LANE_TABLE_EMPTY_H;
+        const tableHeight = LANE_TABLE_PAD_TOP + LANE_TABLE_HEADER_H + bodyH + LANE_TABLE_PAD_BOTTOM;
+        expansion = {
+          open: true,
+          tableY: laneTop + LANE_H + LANE_TABLE_PAD_TOP,
+          tableHeight: LANE_TABLE_HEADER_H + bodyH + LANE_TABLE_PAD_BOTTOM,
+          rowCount,
+          visibleRows,
+          scrollable: rowCount > visibleRows,
+        };
+        cumulativeOffset += tableHeight;
+      }
       const memberships = (lane.memberships ?? []).map(membership => ({
         ...membership,
         x: membership.anchor?.x ?? anchorById[membership.event_id]?.x ?? TIMELINE_X0,
@@ -152,6 +198,7 @@ export function computeDetailLayout(graph, width) {
         memberships,
         dfEdges,
         relationPortX: RELATION_PORT_X,
+        expansion,
       };
     });
     const bandHeight = BAND_HEADER_H + Math.max(lanes.length, 1) * LANE_H + cumulativeOffset;

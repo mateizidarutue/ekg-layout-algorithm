@@ -548,7 +548,7 @@ export function getDetailGraph(options = {}) {
   const anchorSet = new Set([anchorEntityId, ...compareEntityIds]);
   const filteredSeedEvents = [...anchorSet].flatMap(entityId => _filterEvents(_store.eventsByEntityId[entityId] ?? [], options));
   const seedEventIds = new Set(filteredSeedEvents.map(event => event.event_id));
-  const focusScope = _resolveDetailFocusScope(anchorEntity, filteredSeedEvents, seedEventIds);
+  const focusScope = _resolveDetailFocusScope(anchorEntity, filteredSeedEvents, seedEventIds, anchorSet);
   const contextEntityIds = focusScope?.contextEntityIds
     ? new Set(focusScope.contextEntityIds)
     : new Set(anchorSet);
@@ -1071,6 +1071,15 @@ export function getActivityCountsForEntity(entityId) {
   return _countBy(_store.eventsByEntityId[entityId] ?? [], event => event.activity);
 }
 
+// Synchronization degree = number of distinct entities correlated to an event.
+// Single source of truth: the per-entity table SYNC column, the T4 hotspot
+// degree, and T4 mark sizing all derive from this so they can never disagree.
+// entity_ids is the deduplicated set, so multiple correlation edges from the
+// same entity to one event (different relation types) count once.
+export function eventSyncDegree(event) {
+  return event?.entity_ids?.length ?? 0;
+}
+
 export function getGlobalSharedEventHotspots({ activities = null, entityTypeFilter = null, sortBy = "frequency", minSharedEntities = 2, dateFrom = null, dateTo = null } = {}) {
   if (!_store) return [];
   // Apply date + activity filters up front so every downstream calculation
@@ -1078,7 +1087,7 @@ export function getGlobalSharedEventHotspots({ activities = null, entityTypeFilt
   const events = _filterEvents(_store.events, { activities, dateFrom, dateTo });
   const byActivity = new Map();
   events.forEach(event => {
-    if (event.entity_ids.length < minSharedEntities) return;
+    if (eventSyncDegree(event) < minSharedEntities) return;
     const types = [...new Set(event.memberships.map(m => m.entity_type))];
     if (entityTypeFilter && !types.some(t => entityTypeFilter.has(t))) return;
     if (!byActivity.has(event.activity)) {
@@ -1097,7 +1106,7 @@ export function getGlobalSharedEventHotspots({ activities = null, entityTypeFilt
 
   const hotspots = [...byActivity.values()].map(entry => {
     const eventObjects = entry.eventIds.map(id => _store.eventById[id]).filter(Boolean);
-    const avgSyncDegree = eventObjects.reduce((sum, e) => sum + e.entity_ids.length, 0) / Math.max(eventObjects.length, 1);
+    const avgSyncDegree = eventObjects.reduce((sum, e) => sum + eventSyncDegree(e), 0) / Math.max(eventObjects.length, 1);
     const dates = eventObjects.map(e => e.date?.getTime()).filter(Number.isFinite);
     const types = [...new Set(eventObjects.flatMap(e => e.memberships.map(m => m.entity_type)))];
     return {
@@ -1115,8 +1124,10 @@ export function getGlobalSharedEventHotspots({ activities = null, entityTypeFilt
     };
   });
 
-  if (sortBy === "syncStrength") hotspots.sort((a, b) => b.avgSyncDegree - a.avgSyncDegree || b.eventCount - a.eventCount);
-  else if (sortBy === "recency") hotspots.sort((a, b) => (b.lastDate?.getTime() ?? 0) - (a.lastDate?.getTime() ?? 0));
+  // Deterministic tiebreaks so the same data + floor always yields the same
+  // order: degree desc -> frequency desc -> activity identifier asc.
+  if (sortBy === "syncStrength") hotspots.sort((a, b) => b.avgSyncDegree - a.avgSyncDegree || b.eventCount - a.eventCount || a.activity.localeCompare(b.activity));
+  else if (sortBy === "recency") hotspots.sort((a, b) => (b.lastDate?.getTime() ?? 0) - (a.lastDate?.getTime() ?? 0) || b.eventCount - a.eventCount || a.activity.localeCompare(b.activity));
   else hotspots.sort((a, b) => b.eventCount - a.eventCount || a.activity.localeCompare(b.activity));
 
   return hotspots.filter(h => h.eventCount > 0);
@@ -1384,61 +1395,28 @@ function _buildActivityBands(filteredEvents, _filteredEventIdSet, timeRange) {
   };
 }
 
-export function getSharedEventOverview({ activities = null, limit = 10, minSharedEntities = 2, dateFrom = null, dateTo = null } = {}) {
-  if (!_store) return { totalSharedEvents: 0, topActivities: [], topEntityEvents: [], topTypePairs: [] };
-  const allFiltered = _filterEvents(_store.events, { activities, dateFrom, dateTo });
-  const sharedEvents = allFiltered.filter(event => event.entity_ids.length >= minSharedEntities);
-  const topActivities = getGlobalSharedEventHotspots({ activities, sortBy: "frequency", minSharedEntities, dateFrom, dateTo }).slice(0, limit);
-  const typePairCounts = new Map();
-  sharedEvents.forEach(event => {
-    const types = [...new Set(event.memberships.map(membership => membership.entity_type))].sort();
-    for (let i = 0; i < types.length; i++) {
-      for (let j = i + 1; j < types.length; j++) {
-        const key = `${types[i]} -> ${types[j]}`;
-        if (!typePairCounts.has(key)) typePairCounts.set(key, { pair: key, eventIds: new Set(), entityIds: new Set() });
-        const entry = typePairCounts.get(key);
-        entry.eventIds.add(event.event_id);
-        event.memberships
-          .filter(membership => membership.entity_type === types[i] || membership.entity_type === types[j])
-          .forEach(membership => entry.entityIds.add(membership.entity_id));
-      }
-    }
-  });
-  const topTypePairs = [...typePairCounts.values()]
-    .map(entry => ({
-      pair: entry.pair,
-      eventCount: entry.eventIds.size,
-      entityCount: entry.entityIds.size,
-    }))
-    .sort((a, b) => b.eventCount - a.eventCount || b.entityCount - a.entityCount || a.pair.localeCompare(b.pair))
-    .slice(0, limit);
-  const _seenTypeSets = new Set();
-  const topEntityEvents = sharedEvents
-    .map(event => ({
-      eventId: event.event_id,
-      activity: event.activity,
-      color: _store.activityColorByName[event.activity] ?? "#64748b",
-      entityCount: event.entity_ids.length,
-      entityTypes: [...new Set(event.memberships.map(membership => membership.entity_type))].sort(),
-      timestamp: event.date,
-      entityPreview: event.entity_ids.slice(0, 4),
-    }))
-    .sort((a, b) => b.entityCount - a.entityCount || (a.timestamp?.getTime?.() ?? 0) - (b.timestamp?.getTime?.() ?? 0) || a.eventId.localeCompare(b.eventId))
-    .filter(ev => {
-      const key = ev.entityTypes.join("|");
-      if (_seenTypeSets.has(key)) return false;
-      _seenTypeSets.add(key);
-      return true;
-    })
-    .slice(0, limit);
+// Pure: bins events into year-month buckets. Returns [{ key:"YYYY-MM", count }] sorted ascending by key.
+// Uses UTC ISO slice so bucketing is timezone-independent and deterministic.
+export function binEventsByMonth(events) {
+  const counts = new Map();
+  for (const event of events) {
+    const date = event?.date;
+    if (!(date instanceof Date) || isNaN(date.getTime())) continue;
+    const key = date.toISOString().slice(0, 7);
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+  }
+  return [...counts.entries()]
+    .map(([key, count]) => ({ key, count }))
+    .sort((a, b) => a.key.localeCompare(b.key));
+}
 
-  return {
-    totalSharedEvents: sharedEvents.length,
-    totalSharedEntities: new Set(sharedEvents.flatMap(event => event.entity_ids)).size,
-    topActivities,
-    topEntityEvents,
-    topTypePairs,
-  };
+// Dataset-level shared-event temporal buckets. Always degree >= 2 (the shared-event definition),
+// independent of the T4 degree-floor display control. Reuses the canonical event filter + sync degree.
+export function getSharedEventTimeBuckets({ activities = null, dateFrom = null, dateTo = null } = {}) {
+  if (!_store) return [];
+  const filtered = _filterEvents(_store.events, { activities, dateFrom, dateTo });
+  const sharedEvents = filtered.filter(event => eventSyncDegree(event) >= 2);
+  return binEventsByMonth(sharedEvents);
 }
 
 export function getEntitiesForHotspot(hotspotId, { maxEntities = 8, dateFrom = null, dateTo = null, focusType = null } = {}) {
@@ -1498,16 +1476,22 @@ function _buildEntityList(entities, eventsByEntityId) {
     .sort((a, b) => a.type.localeCompare(b.type) || b.eventCount - a.eventCount || a.label.localeCompare(b.label));
 }
 
-function _resolveDetailFocusScope(anchorEntity, filteredSeedEvents, seedEventIds) {
+function _resolveDetailFocusScope(anchorEntity, filteredSeedEvents, seedEventIds, focusEntityIds = null) {
   if (!_store?.itemType || !_store?.caseType) return null;
   const isItemAnchor = anchorEntity.primary_type === _store.itemType;
   const isCaseAnchor = anchorEntity.primary_type === _store.caseType;
   if (!isItemAnchor && !isCaseAnchor) return null;
 
-  const contextEntityIds = new Set([anchorEntity.entity_id]);
+  // The focus set is every entity the view is anchored on — the anchor plus
+  // any compared peers (e.g., the top-N cases in a variant compare). All of
+  // them must be kept as context entities, not just the anchor, otherwise the
+  // peer cases vanish from the bands.
+  const focusSet = focusEntityIds ? new Set(focusEntityIds) : new Set([anchorEntity.entity_id]);
+  focusSet.add(anchorEntity.entity_id);
+  const contextEntityIds = new Set(focusSet);
   filteredSeedEvents.forEach(event => {
     (event.memberships ?? []).forEach(membership => {
-      if (membership.entity_id === anchorEntity.entity_id) {
+      if (focusSet.has(membership.entity_id)) {
         contextEntityIds.add(membership.entity_id);
       } else if (isItemAnchor && membership.entity_type === _store.caseType) {
         contextEntityIds.add(membership.entity_id);
@@ -2114,6 +2098,72 @@ function _traceEntityPath(events, edges, eventById) {
 function _sequencePassesActivityFilter(sequence, activities) {
   if (!activities) return true;
   return (sequence ?? []).every(activity => activities.has(activity));
+}
+
+// Per-entity timeline rows for the expandable lane table in T2/T3.
+//
+// Returns events in the same df-path order the canvas uses, joined to the
+// already-computed bottleneck flags on lane.dfEdges so the table and the
+// canvas can never disagree. The df-gap on each row is the gap to the
+// successor event in this lane's df-path; the last event in the path has
+// null. Co-temporal events still occupy distinct rows because each event
+// has a unique event_id.
+//
+// `lane` is the lane object produced by _buildLane (already carries
+// `events`, `dfEdges` with `gapHours`+`isBottleneck`, and `eventIds`).
+// `eventById` is the store's event index — used to recover the raw,
+// unfiltered correlated entities for an event (matches what the existing
+// hover tooltips show via `event.memberships`).
+export function buildEntityTimelineRows(lane, eventById) {
+  if (!lane) return [];
+  const events = lane.events ?? [];
+  if (!events.length) return [];
+  const eventMap = Object.fromEntries(events.map(event => [event.event_id, event]));
+  // Same traversal the lane sequence uses, so the table row order matches
+  // the visual df-path on the canvas.
+  const ordered = _traceEntityPath(events, lane.dfEdges ?? [], eventMap).eventIds
+    .map(id => eventMap[id])
+    .filter(Boolean);
+
+  // Index df edges by source event for O(1) lookup of "next gap" and
+  // bottleneck flag. A given event in a lane may have multiple outgoing
+  // df edges in pathological data; pick the one whose target equals the
+  // next event in df-path order to stay consistent with the canvas curve.
+  const edgesBySource = new Map();
+  (lane.dfEdges ?? []).forEach(edge => {
+    if (!edgesBySource.has(edge.source_event_id)) edgesBySource.set(edge.source_event_id, []);
+    edgesBySource.get(edge.source_event_id).push(edge);
+  });
+
+  return ordered.map((event, index) => {
+    const next = ordered[index + 1] ?? null;
+    let dfEdge = null;
+    if (next) {
+      const candidates = edgesBySource.get(event.event_id) ?? [];
+      dfEdge = candidates.find(edge => edge.target_event_id === next.event_id) ?? null;
+    }
+    // rawMemberships isn't attached to bare events in _store.eventById —
+    // the event itself carries `memberships` (the unfiltered correlation
+    // list) and `entity_ids`. Use `memberships` so we get type + label too.
+    const memberships = eventById?.[event.event_id]?.memberships ?? event.memberships ?? [];
+    const syncDegree = eventSyncDegree(eventById?.[event.event_id] ?? event);
+    const correlatedEntities = syncDegree > 1
+      ? memberships.map(m => ({
+          entity_id: m.entity_id,
+          entity_label: m.entity_label ?? m.entity_id,
+          entity_type: m.entity_type ?? "",
+        }))
+      : [];
+    return {
+      event_id: event.event_id,
+      activity: event.activity ?? "",
+      date: event.date instanceof Date ? event.date : null,
+      dfGapHours: dfEdge ? dfEdge.gapHours : null,
+      isBottleneck: Boolean(dfEdge?.isBottleneck),
+      syncDegree,
+      correlatedEntities,
+    };
+  });
 }
 
 function _entityLabel(entity) {
