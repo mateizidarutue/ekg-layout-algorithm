@@ -4,7 +4,7 @@ import { loadDataset, loadManifest, datasetUrl, datasetFromQuery } from "./data/
 import {
   buildStore, getStore, getVariantOverview, getEkgView,
   getActivityDfGraph, getDetailGraph, getGlobalSharedEventHotspots, getSharedEventTimeBuckets, getEntitiesForHotspot,
-  buildEntityTimelineRows,
+  buildEntityTimelineRows, getSequenceEntityTypes,
 } from "./data/store.js";
 import { computeDetailLayout } from "./layout/detailLayout.js";
 import { computeVariantLayout, computeDfGraphLayout } from "./layout/overviewLayout.js";
@@ -77,6 +77,10 @@ let _filters = {
   maxEntitiesPerType: 8,
   visibleEntityTypes: null,
   sharedOnly: false,
+  // T3-only lens: which entity type's activity sequences are grouped into
+  // process variants. null = use the dataset's default item type. Set by the
+  // "Variant entity type" sidebar toggle (single-select). Reset on reload.
+  variantEntityType: null,
 };
 
 // ── Boot ──────────────────────────────────────────────────────────────────────
@@ -148,6 +152,7 @@ function _afterLoad(store, name) {
   _filters.maxEntitiesPerType = null;
   _filters.visibleEntityTypes = null;
   _filters.sharedOnly = false;
+  _filters.variantEntityType = null;
   _clusterActivityContext = null;
   _isolatedClusterContext = null;
   _compareEntityIds = [];
@@ -365,10 +370,17 @@ function _renderLayers(route, store) {
 
 function _renderVariants(route, store, w, lBg, lNodes, lLabels, cb) {
   const selectedVariantKey = route.params.variant ?? null;
-  const variantData = getVariantOverview({ activities: _filters.activities });
+  const sequenceTypes = getSequenceEntityTypes();
+  // Resolve the active lens: the user's pick if it still bears sequences,
+  // otherwise the dataset's default item type if it does, otherwise the
+  // top sequence-bearing type. null means "let the store use its default".
+  const activeType = _resolveVariantEntityType(sequenceTypes);
+  _renderVariantEntityTypeFilters(sequenceTypes, activeType);
+  const variantFilters = { activities: _filters.activities, variantEntityType: activeType };
+  const variantData = getVariantOverview(variantFilters);
   variantData.variants.forEach(v => { v.isSelected = v.key === selectedVariantKey; });
   const selectedVariant = variantData.variants.find(v => v.key === selectedVariantKey) ?? null;
-  variantData.dfGraph = getActivityDfGraph({ activities: _filters.activities });
+  variantData.dfGraph = getActivityDfGraph(variantFilters);
   _variantData = variantData;
 
   const viewportH = svg.node().clientHeight;
@@ -425,15 +437,24 @@ function _renderCompareDetail(route, store, w, lBg, lMeta, lRel, lCorr, lDf, lNo
   // defeats the purpose of comparing within a single behavioural variant.
   let restrictedItemIds = null;
   let variantContext = null;
+  // The variant lens (e.g. "application") must drive this view too, otherwise
+  // the scope is resolved against the dataset's default item type (workflow)
+  // and the chart shows the wrong entity's traces.
+  const activeVariantType = _resolveVariantEntityType(getSequenceEntityTypes());
   if (route.params.variant) {
     try {
-      const variantData = _variantData ?? getVariantOverview({ activities: _filters.activities });
+      const variantData = (_variantData && _variantData.itemType === activeVariantType)
+        ? _variantData
+        : getVariantOverview({ activities: _filters.activities, variantEntityType: activeVariantType });
       const v = variantData.variants.find(x => x.key === route.params.variant);
       if (v) {
-        restrictedItemIds = (v.items ?? []).map(item => item.id);
-        // Pull caseType from the overview so the scope note reads "3 of 5
-        // purchaseorders" instead of "3 of 5 cases".
-        variantContext = { ...v, caseType: variantData.caseType };
+        // We compare the lens entities themselves, so the chart shows exactly
+        // the entities in the URL — not every item of the variant. This keeps
+        // shared-event correlations from pulling in extra lens entities.
+        restrictedItemIds = entityIds;
+        // Carry both type labels so the scope note / picker read in terms of
+        // the lens entity (itemType, e.g. "applications") that we now compare.
+        variantContext = { ...v, caseType: variantData.caseType, itemType: variantData.itemType };
       }
     } catch (err) {
       console.warn("Failed to resolve variant for compare scope:", err);
@@ -449,9 +470,17 @@ function _renderCompareDetail(route, store, w, lBg, lMeta, lRel, lCorr, lDf, lNo
     dateFrom,
     dateTo,
     restrictedItemIds,
+    // Scope the item band to the variant lens so application variants show
+    // application lanes (and the default workflow band is dropped).
+    restrictedItemType: route.params.variant ? activeVariantType : undefined,
   });
   let renderGraph = _resolveDetailRenderGraph(_detailGraph);
-  if (variantContext) {
+  // Regroup item lanes under their parent case only when the variant lens is a
+  // genuine sub-entity of the case. When the lens IS the case type (e.g. a
+  // PurchaseOrder variant in a PurchaseOrder-cased dataset), the case band and
+  // the item band are one and the same, so regrouping would list every entity
+  // twice (once as the case lane, once as its own child). Skip it there.
+  if (variantContext && renderGraph.itemType !== renderGraph.caseType) {
     renderGraph = _regroupBandsByCase(renderGraph, entityIds);
   }
   _renderCompareAddPicker(variantContext, entityIds, store);
@@ -481,11 +510,11 @@ function _injectVariantScopeNote(variant, compareEntityIds) {
   const content = document.getElementById("detail-summary-content");
   if (!content) return;
   const itemCount = variant.items?.length ?? 0;
-  const memberCount = variant.members?.length ?? 0;
+  const itemTypeLabel = (variant.itemType ?? "item").toLowerCase();
   content.insertAdjacentHTML("afterbegin", `
     <div class="variant-scope-chip">
       <span class="variant-scope-chip-tag">VARIANT ${_escHtml(variant.rank)}</span>
-      <span class="variant-scope-chip-text">${itemCount} item${itemCount === 1 ? "" : "s"} · top ${compareEntityIds.length} of ${memberCount} ${_escHtml((variant.caseType ?? "case").toLowerCase())}${memberCount === 1 ? "" : "s"}</span>
+      <span class="variant-scope-chip-text">top ${compareEntityIds.length} of ${itemCount} ${_escHtml(itemTypeLabel)}${itemCount === 1 ? "" : "s"}</span>
     </div>
     <div class="stat-row stat-row-flow">
       <span class="stat-label">Variant sequence</span>
@@ -572,14 +601,17 @@ function _renderCompareAddPicker(variantContext, entityIds, store) {
   }
 
   const existing = new Set(entityIds);
-  const remaining = (variantContext.members ?? []).filter(m => !existing.has(m.id));
-  _variantPickerMembers = { members: remaining, itemType: store?.itemType ?? "" };
+  // We compare the variant's lens entities (items), so the picker offers the
+  // remaining items of this variant — not the parent cases (members).
+  const remaining = (variantContext.items ?? []).filter(m => !existing.has(m.id));
+  const lensLabel = variantContext.itemType ?? store?.itemType ?? "";
+  _variantPickerMembers = { members: remaining, itemType: lensLabel, mode: "items" };
   wrap.classList.add("variant-picker");
   input.setAttribute("data-variant-mode", "1");
   input.value = "";
   input.placeholder = remaining.length
-    ? `Filter ${remaining.length} remaining variant member${remaining.length === 1 ? "" : "s"}…`
-    : "All variant members already compared";
+    ? `Filter ${remaining.length} remaining variant ${lensLabel.toLowerCase() || "item"}${remaining.length === 1 ? "" : "s"}…`
+    : `All variant ${lensLabel.toLowerCase() || "item"}s already compared`;
   input.disabled = !remaining.length;
   _renderVariantPickerResults("");
 }
@@ -587,16 +619,18 @@ function _renderCompareAddPicker(variantContext, entityIds, store) {
 function _renderVariantPickerResults(filterText) {
   const results = document.getElementById("compare-add-results");
   if (!results || !_variantPickerMembers) return;
-  const { members, itemType } = _variantPickerMembers;
+  const { members, itemType, mode } = _variantPickerMembers;
   const q = (filterText ?? "").trim().toLowerCase();
   const hits = q
     ? members.filter(m => String(m.id).toLowerCase().includes(q) || String(m.label ?? "").toLowerCase().includes(q))
     : members;
   if (!hits.length) {
-    results.innerHTML = `<div class="empty-note" style="padding:8px 10px;font-size:11px;color:var(--text-dim)">${members.length ? "No matches." : "No remaining members."}</div>`;
+    results.innerHTML = `<div class="empty-note" style="padding:8px 10px;font-size:11px;color:var(--text-dim)">${members.length ? "No matches." : "No remaining entities."}</div>`;
   } else {
     results.innerHTML = hits.map(m => {
-      const sub = `${m.itemCount ?? 0} ${itemType.toLowerCase()} - ${m.eventCount ?? 0} events`;
+      const sub = mode === "items"
+        ? `${m.eventCount ?? 0} events`
+        : `${m.itemCount ?? 0} ${itemType.toLowerCase()} - ${m.eventCount ?? 0} events`;
       return `<div class="compare-result-row" data-id="${_escAttr(m.id)}"><span class="compare-result-label">${_escHtml(m.label ?? m.id)}</span><span class="compare-result-type">${_escHtml(sub)}</span></div>`;
     }).join("");
     results.querySelectorAll(".compare-result-row").forEach(row => {
@@ -1177,6 +1211,54 @@ function _onActivityToggle(activity, checked) {
   handleRoute(getRoute());
 }
 
+// Resolve which entity type drives the variant computation. Prefers the user's
+// explicit pick (_filters.variantEntityType) if it still bears sequences;
+// falls back to the dataset's item type if that bears sequences; otherwise the
+// top sequence-bearing type. Returns null when nothing qualifies (store falls
+// back to its own default).
+function _resolveVariantEntityType(sequenceTypes) {
+  if (!sequenceTypes || !sequenceTypes.length) return null;
+  const names = new Set(sequenceTypes.map(t => t.type));
+  if (_filters.variantEntityType && names.has(_filters.variantEntityType)) return _filters.variantEntityType;
+  const store = getStore();
+  if (store && names.has(store.itemType)) return store.itemType;
+  return sequenceTypes[0].type;
+}
+
+// Render the single-select "Variant entity type" toggle in the T3 sidebar.
+// Each sequence-bearing type is a chip; clicking one re-scopes the variant
+// distribution to that entity. Clears any stale variant selection on change.
+function _renderVariantEntityTypeFilters(sequenceTypes, activeType) {
+  const container = document.getElementById("variant-entity-type-list");
+  if (!container) return;
+  container.innerHTML = "";
+  if (!sequenceTypes || sequenceTypes.length <= 1) {
+    // Nothing to choose between — hide the control to avoid a dead toggle.
+    container.closest(".ctrl-group")?.classList.add("is-hidden");
+    return;
+  }
+  container.closest(".ctrl-group")?.classList.remove("is-hidden");
+  sequenceTypes.forEach(({ type, displayLabel, color, sequenceCount }) => {
+    const chip = document.createElement("button");
+    chip.type = "button";
+    chip.className = "variant-type-chip" + (type === activeType ? " is-active" : "");
+    chip.dataset.type = type;
+    chip.innerHTML = `<span class="variant-type-chip__dot" style="background:${color}"></span>`
+      + `<span class="variant-type-chip__label">${displayLabel}</span>`
+      + `<span class="variant-type-chip__count">${sequenceCount}</span>`;
+    chip.addEventListener("click", () => {
+      if (_filters.variantEntityType === type) return;
+      _filters.variantEntityType = type;
+      // The selected variant key belongs to the previous lens — drop it so we
+      // don't land on a non-existent variant under the new entity type.
+      const route = getRoute();
+      if (route.params.variant) { navigate("compare", {}); return; }
+      handleRoute(getRoute());
+    });
+    container.appendChild(chip);
+  });
+}
+
 function _renderEntityTypeFilters(detailGraph) {
   const container = document.getElementById("entity-type-list");
   if (!container) return;
@@ -1725,21 +1807,20 @@ function _updateVariantPanels(variantData, selectedVariant) {
   summaryTitle.textContent = `Variant ${selectedVariant.rank}`;
   summaryContent.innerHTML = _variantSummaryHtml(selectedVariant, itemType, caseType);
 
-  const topMembers = (selectedVariant.members ?? []).slice(0, 3).map(x => x.id);
-  if (topMembers.length > 1) {
-    // The top-N picker uses the variant's own `members` ranking, which is
-    // sorted by item count desc → event count desc → label asc (see
-    // getVariantOverview in store.js). So "top 3" means the three parent
-    // entities that own the most items belonging to this variant.
-    const topTitle = `Top ${topMembers.length} ${_escHtml(caseType.toLowerCase())} ranked by items in this variant`;
+  // The variant concerns the lens entity (e.g. Application), so "compare" means
+  // putting the variant's own entities side by side — NOT their parent cases.
+  // `items` is the variant's lens entities, sorted by event count desc → id.
+  const topItems = (selectedVariant.items ?? []).slice(0, 3).map(x => x.id);
+  if (topItems.length > 1) {
+    const topTitle = `Top ${topItems.length} ${_escHtml(itemType.toLowerCase())} ranked by events in this variant`;
     summaryContent.insertAdjacentHTML("beforeend", `<div class="variant-summary-actions">
-      <button type="button" class="btn btn-sm" id="btn-compare-top3" title="${topTitle}">Compare top ${topMembers.length} ${_escHtml(caseType.toLowerCase())}</button>
-      <div class="variant-summary-hint">Ranked by items in this variant (item count → event count → id)</div>
+      <button type="button" class="btn btn-sm" id="btn-compare-top3" title="${topTitle}">Compare top ${topItems.length} ${_escHtml(itemType.toLowerCase())}</button>
+      <div class="variant-summary-hint">Ranked by events in this variant (event count → id)</div>
     </div>`);
     summaryContent.querySelector("#btn-compare-top3")?.addEventListener("click", () => {
-      // Pass the variant key so the compare detail view restricts the
-      // item-band to this variant's items, not every item of every parent.
-      navigate("compare", { entities: topMembers.join(","), variant: selectedVariant.key });
+      // Pass the variant key so the compare detail view scopes the chart to
+      // this variant's lens entities and hides every other entity type.
+      navigate("compare", { entities: topItems.join(","), variant: selectedVariant.key });
     });
   }
   itemLabel.textContent = `${itemType} in variant (primary)`;

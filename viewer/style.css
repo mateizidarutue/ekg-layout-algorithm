@@ -359,6 +359,43 @@ body {
  * rule keeps them bounded without spilling. */
 .compare-variants-only .entity-list { max-height: min(34vh, 240px); }
 
+/* ── Variant entity-type lens (T3 sidebar single-select toggle) ──────────── */
+.variant-type-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.variant-type-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 9px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text, #e2e8f0);
+  font-size: 11.5px;
+  cursor: pointer;
+  transition: background 0.12s, border-color 0.12s;
+}
+.variant-type-chip:hover { background: rgba(255, 255, 255, 0.09); }
+.variant-type-chip.is-active {
+  border-color: var(--accent, #2563eb);
+  background: rgba(37, 99, 235, 0.22);
+}
+.variant-type-chip__dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  flex: 0 0 auto;
+}
+.variant-type-chip__label { font-weight: 600; }
+.variant-type-chip__count {
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 10px;
+  opacity: 0.7;
+}
+
 .entity-item {
   display: flex;
   justify-content: space-between;
@@ -1296,6 +1333,9 @@ body.time-brush-active #canvas .band-header { cursor: pointer; }
 #sidebar[data-route="compare"][data-compare-mode="compare"] .nav-entities          { display: block; }
 
 #sidebar[data-route="compare"][data-compare-mode="variants"] .compare-variants-only { display: block; }
+/* JS can hide an otherwise-visible route panel (e.g. variant-type toggle when
+ * there is only one sequence-bearing type to choose from). */
+.ctrl-group.is-hidden { display: none !important; }
 #sidebar[data-route="compare"][data-compare-mode="compare"]  .compare-mode-only     { display: block; }
 
 #sidebar[data-route="explore"][data-explore-drilled="true"] .explore-drilled-only  { display: block; }

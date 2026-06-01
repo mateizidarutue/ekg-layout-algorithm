@@ -4,6 +4,8 @@ __pycache__/
 *.pyc
 output/*.json
 data/raw/
+data/**/*.csv
+data/**/*.pkl
 _promg_config.yaml
 *.egg-info/
 .DS_Store

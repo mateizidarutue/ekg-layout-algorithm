@@ -4,4 +4,5 @@ MATCH (e:Event)-[r]->(en:Entity)
 RETURN
   toString(id(e))                                      AS event_id,
   COALESCE(toString(en.sysId), toString(en.ID))        AS entity_id,
+  labels(en)                                           AS entity_labels,
   type(r)                                              AS relation_type

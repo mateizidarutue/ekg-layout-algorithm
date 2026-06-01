@@ -31,6 +31,14 @@ def _stringify_props(props: dict) -> dict:
     }
 
 
+def _qualify_entity_id(raw_id: str | None, node_labels: list[str]) -> str:
+    """Prefix sysId with the primary label so entities sharing a sysId stay distinct."""
+    if not raw_id or raw_id == "None":
+        return raw_id or ""
+    primary = _infer_primary_type(node_labels)
+    return f"{primary}:{raw_id}" if primary and primary != "Entity" else raw_id
+
+
 def _infer_primary_type(node_labels: list[str]) -> str:
     labels = [label for label in (node_labels or []) if label]
     specific = sorted(label for label in labels if label not in GENERIC_ENTITY_LABELS)
@@ -71,35 +79,67 @@ def _run_rows(session, cypher_name: str, **params):
     yield from _iter_query(session, _load_cypher(cypher_name), **params)
 
 
-def _infer_case_item_types(session) -> tuple[str, str]:
+def _infer_case_item_types(session, hint_case_type: str | None = None) -> tuple[str, str | None]:
     row = session.run("""
         MATCH (src:Entity)-[:HAS_ITEM]->(tgt:Entity)
         RETURN labels(src) AS src_labels, labels(tgt) AS tgt_labels
         LIMIT 1
     """).single()
+    if row is not None:
+        return _infer_primary_type(row["src_labels"]), _infer_primary_type(row["tgt_labels"])
+
+    if hint_case_type:
+        return hint_case_type, None
+
+    # Fall back: entity type with the most correlated events
+    row = session.run("""
+        MATCH (e:Event)-[]->(en:Entity)
+        UNWIND [label IN labels(en) WHERE label <> 'Entity'] AS label
+        WITH label, count(DISTINCT e) AS n
+        RETURN label ORDER BY n DESC LIMIT 1
+    """).single()
     if row is None:
-        raise RuntimeError("Could not infer case/item types from HAS_ITEM relationships.")
-    return _infer_primary_type(row["src_labels"]), _infer_primary_type(row["tgt_labels"])
+        raise RuntimeError(
+            "Could not infer case type. Use --case-type to specify it explicitly."
+        )
+    print(f"  No HAS_ITEM found — using '{row['label']}' as case type (most event-correlated entity).")
+    return row["label"], None
 
 
-def _fetch_case_sample_metadata(session, case_type: str, item_type: str) -> list[dict]:
-    query = """
-        MATCH (c:Entity)
-        WHERE $case_type IN labels(c)
-        OPTIONAL MATCH (c)-[:HAS_ITEM]->(item:Entity)
-        WHERE $item_type IN labels(item)
-        WITH c, count(DISTINCT item) AS item_count
-        OPTIONAL MATCH (e:Event)-[]->(c)
-        WITH c, item_count, count(DISTINCT e) AS event_count, min(e.timestamp) AS first_ts, max(e.timestamp) AS last_ts
-        RETURN
-          COALESCE(toString(c.sysId), toString(c.ID))        AS case_id,
-          COALESCE(toString(c.documentType), toString(c.type), 'Unknown') AS document_type,
-          event_count                                        AS event_count,
-          item_count                                         AS item_count,
-          toString(first_ts)                                 AS first_ts,
-          toString(last_ts)                                  AS last_ts
-    """
-    return [record.data() for record in _iter_query(session, query, case_type=case_type, item_type=item_type)]
+def _fetch_case_sample_metadata(session, case_type: str, item_type: str | None) -> list[dict]:
+    if item_type is not None:
+        query = """
+            MATCH (c:Entity)
+            WHERE $case_type IN labels(c)
+            OPTIONAL MATCH (c)-[:HAS_ITEM]->(item:Entity)
+            WHERE $item_type IN labels(item)
+            WITH c, count(DISTINCT item) AS item_count
+            OPTIONAL MATCH (e:Event)-[]->(c)
+            WITH c, item_count, count(DISTINCT e) AS event_count, min(e.timestamp) AS first_ts, max(e.timestamp) AS last_ts
+            RETURN
+              COALESCE(toString(c.sysId), toString(c.ID))        AS case_id,
+              COALESCE(toString(c.documentType), toString(c.type), 'Unknown') AS document_type,
+              event_count                                        AS event_count,
+              item_count                                         AS item_count,
+              toString(first_ts)                                 AS first_ts,
+              toString(last_ts)                                  AS last_ts
+        """
+        return [record.data() for record in _iter_query(session, query, case_type=case_type, item_type=item_type)]
+    else:
+        query = """
+            MATCH (c:Entity)
+            WHERE $case_type IN labels(c)
+            OPTIONAL MATCH (e:Event)-[]->(c)
+            WITH c, count(DISTINCT e) AS event_count, min(e.timestamp) AS first_ts, max(e.timestamp) AS last_ts
+            RETURN
+              COALESCE(toString(c.sysId), toString(c.ID))        AS case_id,
+              COALESCE(toString(c.documentType), toString(c.type), 'Unknown') AS document_type,
+              event_count                                        AS event_count,
+              0                                                  AS item_count,
+              toString(first_ts)                                 AS first_ts,
+              toString(last_ts)                                  AS last_ts
+        """
+        return [record.data() for record in _iter_query(session, query, case_type=case_type)]
 
 
 def _select_evenly_spaced(rows: list[dict], n: int) -> list[dict]:
@@ -244,14 +284,16 @@ def _export_sampled_subset(session, case_ids: list[str]) -> tuple[list[dict], li
         RETURN
           toString(id(e))                               AS event_id,
           COALESCE(toString(en.sysId), toString(en.ID)) AS entity_id,
+          labels(en)                                    AS entity_labels,
           type(r)                                       AS relation_type
     """
     corr = []
-    selected_entity_ids = set(event_anchor_entity_ids)
+    selected_entity_ids = set(event_anchor_entity_ids)  # raw sysIds for query filtering
     for row in _iter_query(session, corr_query, event_ids=selected_event_neo_ids):
         event_id = event_id_map.get(str(row["event_id"]), str(row["event_id"]))
-        entity_id = str(row["entity_id"])
-        selected_entity_ids.add(entity_id)
+        raw_entity_id = str(row["entity_id"])
+        entity_id = _qualify_entity_id(raw_entity_id, row.get("entity_labels") or [])
+        selected_entity_ids.add(raw_entity_id)
         corr.append({
             "event_id": event_id,
             "entity_id": entity_id,
@@ -290,7 +332,7 @@ def _export_sampled_subset(session, case_ids: list[str]) -> tuple[list[dict], li
     entity_by_id = {}
     for row in _iter_query(session, entity_query, entity_ids=sorted(selected_entity_ids)):
         props = dict(row.get("props") or {})
-        entity_id = str(row["entity_id"])
+        entity_id = _qualify_entity_id(str(row["entity_id"]), row.get("node_labels") or [])
         labels = sorted(label for label in (row.get("node_labels") or []) if label and label != "Entity")
         primary_type = _infer_primary_type(row.get("node_labels") or [])
         entity = {
@@ -304,6 +346,8 @@ def _export_sampled_subset(session, case_ids: list[str]) -> tuple[list[dict], li
             continue
         entity_by_id[entity_id] = entity
         entities.append(entity)
+
+    corr = [edge for edge in corr if edge["entity_id"] in entity_by_id]
 
     df_query = """
         MATCH (src:Event)-[df]->(tgt:Event)
@@ -341,14 +385,16 @@ def _export_sampled_subset(session, case_ids: list[str]) -> tuple[list[dict], li
     """
     df = []
     for row in _iter_query(session, df_query, event_ids=selected_event_neo_ids):
-        entity_id = str(row.get("entity_id") or "").strip()
+        raw_entity_id = str(row.get("entity_id") or "").strip()
+        entity_type = str(row.get("entity_type") or "").strip()
+        entity_id = _qualify_entity_id(raw_entity_id, [entity_type] if entity_type else []) if raw_entity_id else ""
         if entity_id not in entity_by_id:
             continue
         df.append({
             "source_event_id": event_id_map.get(str(row["source_event_id"]), str(row["source_event_id"])),
             "target_event_id": event_id_map.get(str(row["target_event_id"]), str(row["target_event_id"])),
             "entity_id": entity_id,
-            "entity_type": str(row.get("entity_type") or entity_by_id[entity_id]["primary_type"]).strip(),
+            "entity_type": entity_type or entity_by_id[entity_id]["primary_type"],
         })
 
     relation_query = """
@@ -362,14 +408,28 @@ def _export_sampled_subset(session, case_ids: list[str]) -> tuple[list[dict], li
           AND COALESCE(toString(tgt.sysId), toString(tgt.ID), toString(id(tgt))) IN $entity_ids
         RETURN
           COALESCE(toString(src.sysId), toString(src.ID), toString(id(src))) AS source_id,
+          labels(src)                                                         AS src_labels,
           COALESCE(toString(tgt.sysId), toString(tgt.ID), toString(id(tgt))) AS target_id,
+          labels(tgt)                                                         AS tgt_labels,
           type(rel)                                                           AS relation_type,
           properties(rel)                                                     AS props
+        UNION
+        MATCH (src:Entity)-[:FROM]->(relay:Entity)-[:TO]->(tgt:Entity)
+        WHERE NOT src:Event AND NOT tgt:Event AND NOT relay:Activity
+          AND COALESCE(toString(src.sysId), toString(src.ID), toString(id(src))) IN $entity_ids
+          AND COALESCE(toString(tgt.sysId), toString(tgt.ID), toString(id(tgt))) IN $entity_ids
+        RETURN
+          COALESCE(toString(src.sysId), toString(src.ID), toString(id(src)))  AS source_id,
+          labels(src)                                                          AS src_labels,
+          COALESCE(toString(tgt.sysId), toString(tgt.ID), toString(id(tgt)))  AS target_id,
+          labels(tgt)                                                          AS tgt_labels,
+          head([l IN labels(relay) WHERE l <> 'Entity' | l])                   AS relation_type,
+          properties(relay)                                                     AS props
     """
     relations = []
-    for row in _iter_query(session, relation_query, entity_ids=sorted(entity_by_id)):
-        source_id = str(row["source_id"])
-        target_id = str(row["target_id"])
+    for row in _iter_query(session, relation_query, entity_ids=sorted(selected_entity_ids)):
+        source_id = _qualify_entity_id(str(row["source_id"]), row.get("src_labels") or [])
+        target_id = _qualify_entity_id(str(row["target_id"]), row.get("tgt_labels") or [])
         if source_id not in entity_by_id or target_id not in entity_by_id:
             continue
         relations.append({
@@ -384,7 +444,7 @@ def _export_sampled_subset(session, case_ids: list[str]) -> tuple[list[dict], li
     return events, entities, corr, df, relations
 
 
-def run(dataset_name: str, output_path: str, sample_cases: int | None = None, max_case_events: int | None = None) -> None:
+def run(dataset_name: str, output_path: str, sample_cases: int | None = None, max_case_events: int | None = None, hint_case_type: str | None = None) -> None:
     repo_root = Path(__file__).parent.parent
     config = load_config(repo_root / "config.yaml")
     neo4j = config["neo4j"]
@@ -413,7 +473,7 @@ def run(dataset_name: str, output_path: str, sample_cases: int | None = None, ma
 
     with driver.session(database=database) as session:
         if sample_cases:
-            case_type, item_type = _infer_case_item_types(session)
+            case_type, item_type = _infer_case_item_types(session, hint_case_type=hint_case_type)
             metadata_rows = _fetch_case_sample_metadata(session, case_type, item_type)
             selected_case_ids = _pick_sample_case_ids(metadata_rows, sample_cases, max_case_events)
             print(
@@ -444,7 +504,7 @@ def run(dataset_name: str, output_path: str, sample_cases: int | None = None, ma
             entity_by_id = {}
             for row in _run_rows(session, "entities"):
                 props = dict(row.get("props") or {})
-                entity_id = str(row["entity_id"])
+                entity_id = _qualify_entity_id(str(row["entity_id"]), row.get("node_labels") or [])
                 labels = sorted(label for label in (row.get("node_labels") or []) if label and label != "Entity")
                 primary_type = _infer_primary_type(row.get("node_labels") or [])
                 entity = {
@@ -463,7 +523,7 @@ def run(dataset_name: str, output_path: str, sample_cases: int | None = None, ma
             corr = []
             for row in _run_rows(session, "corr"):
                 event_id = event_id_map.get(str(row["event_id"]), str(row["event_id"]))
-                entity_id = str(row["entity_id"])
+                entity_id = _qualify_entity_id(str(row["entity_id"]), row.get("entity_labels") or [])
                 if entity_id not in entity_by_id:
                     continue
                 corr.append({
@@ -475,18 +535,23 @@ def run(dataset_name: str, output_path: str, sample_cases: int | None = None, ma
             print("Exporting df edges...")
             df = []
             for row in _run_rows(session, "df"):
+                raw_entity_id = str(row.get("entity_id") or "").strip()
+                entity_type = str(row.get("entity_type") or "").strip()
+                entity_id = _qualify_entity_id(raw_entity_id, [entity_type] if entity_type else "") if raw_entity_id else ""
+                if entity_id not in entity_by_id:
+                    continue
                 df.append({
                     "source_event_id": event_id_map.get(str(row["source_event_id"]), str(row["source_event_id"])),
                     "target_event_id": event_id_map.get(str(row["target_event_id"]), str(row["target_event_id"])),
-                    "entity_id": str(row.get("entity_id") or "").strip(),
-                    "entity_type": str(row.get("entity_type") or "").strip(),
+                    "entity_id": entity_id,
+                    "entity_type": entity_type or entity_by_id[entity_id]["primary_type"],
                 })
 
             print("Exporting structural relations...")
             relations = []
             for row in _run_rows(session, "relations"):
-                source_id = str(row["source_id"])
-                target_id = str(row["target_id"])
+                source_id = _qualify_entity_id(str(row["source_id"]), row.get("src_labels") or [])
+                target_id = _qualify_entity_id(str(row["target_id"]), row.get("tgt_labels") or [])
                 if source_id not in entity_by_id or target_id not in entity_by_id:
                     continue
                 relations.append({
@@ -580,8 +645,9 @@ def main() -> None:
     parser.add_argument("--output", required=True, help="Output JSON path")
     parser.add_argument("--sample-cases", type=int, default=None, help="Export a case-sampled subset instead of the full dataset")
     parser.add_argument("--max-case-events", type=int, default=None, help="Exclude cases above this event count when sampling")
+    parser.add_argument("--case-type", default=None, help="Entity type to use as 'case' when sampling (auto-detected if omitted)")
     args = parser.parse_args()
-    run(args.dataset, args.output, sample_cases=args.sample_cases, max_case_events=args.max_case_events)
+    run(args.dataset, args.output, sample_cases=args.sample_cases, max_case_events=args.max_case_events, hint_case_type=args.case_type)
 
 
 if __name__ == "__main__":

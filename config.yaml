@@ -5,7 +5,7 @@ neo4j:
   # For local dev convenience you may set a literal fallback below, but DO NOT
   # commit a real password to version control.
   password: ${NEO4J_PASSWORD}
-  default_database: bep1
+  default_database: bep_eval
 
 datasets:
   library:
@@ -19,3 +19,9 @@ datasets:
     semantic_header: data/semantic_headers/bpic19.json
     dataset_description: data/semantic_headers/bpic19_DS.json
     database: bpic19
+
+  bpic17:
+    raw_data: data/raw/bpic17/
+    semantic_header: data/semantic_headers/BPIC17.json
+    dataset_description: data/semantic_headers/BPIC17_DS.json
+    database: bpic17

@@ -303,12 +303,26 @@ function _applyEventMergeToDf(df, merge) {
 }
 
 function _detectCaseItemLens(store) {
-  const relationCandidates = (store.relations ?? []).filter(edge => edge.relation_type === "HAS_ITEM");
-  if (relationCandidates.length) {
-    const pair = relationCandidates[0];
+  // HAS_ITEM: explicit parent → child hierarchy (BPIC19-style)
+  const hasItemCandidates = (store.relations ?? []).filter(edge => edge.relation_type === "HAS_ITEM");
+  if (hasItemCandidates.length) {
+    const pair = hasItemCandidates[0];
     return {
       caseType: pair.source_entity_type,
       itemType: pair.target_entity_type,
+    };
+  }
+
+  // CASE_* reified relations (BPIC17-style): the FROM side (source) is the case entity
+  // (it has more events per entity and drives the overview), the TO side (target) is
+  // the item entity whose event sequences are compared in T3.
+  // For CASE_AW: Workflow (source, W_ events) is case; Application (target, A_ events) is item.
+  const reifiedCandidates = (store.relations ?? []).filter(edge => /^CASE_/.test(edge.relation_type));
+  if (reifiedCandidates.length) {
+    const preferred = reifiedCandidates.find(edge => edge.relation_type === "CASE_AW") ?? reifiedCandidates[0];
+    return {
+      caseType: preferred.source_entity_type,
+      itemType: preferred.target_entity_type,
     };
   }
 
@@ -544,6 +558,21 @@ export function getDetailGraph(options = {}) {
   const restrictedItemIds = options.restrictedItemIds?.length
     ? new Set(options.restrictedItemIds.map(String))
     : null;
+  // restrictedItemType: the entity type that plays the "item" role for this
+  // view. Defaults to the dataset's item type, but the variant-driven compare
+  // flow overrides it with the active variant lens (e.g. "application") so the
+  // band restriction, the per-case regrouping, and the returned itemType all
+  // line up with the entity the variant actually concerns.
+  const restrictedItemType = options.restrictedItemType || _store.itemType;
+  // When a variant lens is active (variant-driven compare), the view must show
+  // ONLY that entity's traces. Datasets like BPIC17 carry several entity types
+  // (Application, Offer, Workflow) wired together by correlations/relations;
+  // without this guard the expansion bleeds the case type and every other type
+  // into the chart. Restrict the bands to the lens type alone; the compared
+  // anchors are always kept regardless of type.
+  const lensAllowedTypes = options.restrictedItemType
+    ? new Set([restrictedItemType])
+    : null;
   const compareEntityIds = _resolveCompareEntityIds(anchorEntity, options.compareEntityIds ?? [], options.compareMode, maxEntitiesPerType);
   const anchorSet = new Set([anchorEntityId, ...compareEntityIds]);
   const filteredSeedEvents = [...anchorSet].flatMap(entityId => _filterEvents(_store.eventsByEntityId[entityId] ?? [], options));
@@ -574,11 +603,15 @@ export function getDetailGraph(options = {}) {
   contextEntityIds.forEach(entityId => {
     const entity = _store.entityById[entityId];
     if (!entity || !enabledTypeSet.has(entity.primary_type)) return;
+    // Variant-lens scope: drop any entity that is neither the lens type nor the
+    // case type (other sequence types like workflows/offers, plus incidental
+    // context). Compared anchors are always kept regardless of type.
+    if (lensAllowedTypes && !lensAllowedTypes.has(entity.primary_type) && !anchorSet.has(entityId)) return;
     // Item-type restriction: when the caller (e.g., the variant-driven
     // compare flow) supplies an explicit list of item ids, drop items that
     // aren't on the list. Items absent from the list are typically children
     // of the selected parents that don't belong to the chosen variant.
-    if (restrictedItemIds && entity.primary_type === _store.itemType && !restrictedItemIds.has(entityId)) return;
+    if (restrictedItemIds && entity.primary_type === restrictedItemType && !restrictedItemIds.has(entityId)) return;
     if (!entityIdsByType[entity.primary_type]) entityIdsByType[entity.primary_type] = [];
     entityIdsByType[entity.primary_type].push(entityId);
   });
@@ -593,7 +626,7 @@ export function getDetailGraph(options = {}) {
       const sortedIds = _sortDetailEntityIds(type, entityIdsByType[type], anchorEntityId, compareEntityIds);
       // Variant-driven compare passes restrictedItemIds: keep all of them
       // visible regardless of the per-type cap.
-      const variantMustKeep = restrictedItemIds && type === _store.itemType ? restrictedItemIds : null;
+      const variantMustKeep = restrictedItemIds && type === restrictedItemType ? restrictedItemIds : null;
       const limitedIds = _limitEntityIds(type, sortedIds, maxEntitiesPerType, anchorEntityId, compareEntityIds, variantMustKeep);
       limitedIds.forEach(entityId => keptEntityIds.add(entityId));
       return {
@@ -711,7 +744,7 @@ export function getDetailGraph(options = {}) {
     anchorEntity,
     compareEntityIds,
     caseType: _store.caseType,
-    itemType: _store.itemType,
+    itemType: restrictedItemType,
     eventAnchors,
     bands: normalizedBands,
     sharedEvents: eventAnchors.filter(anchor => anchor.sharedEntityIds.length >= (options.minSharedEntities ?? 2)),
@@ -849,6 +882,7 @@ export function getOverviewGraph(filters = {}) {
 
 export function getVariantOverview(filters = {}, maxVariants = null) {
   if (!_store) throw new Error("Store not built.");
+  const entityType = filters.variantEntityType || _store.itemType;
   const instances = _collectItemSequences(filters);
   const totalInstances = instances.length;
   const variantsByKey = new Map();
@@ -905,7 +939,7 @@ export function getVariantOverview(filters = {}, maxVariants = null) {
     shownVariantCount: shownVariants.length,
     shownVariantPercent: variants.length ? shownVariants.length / variants.length : 0,
     caseType: _store.caseType,
-    itemType: _store.itemType,
+    itemType: entityType,
     summary: {
       dominantVariantKey: shownVariants[0]?.key ?? null,
       dominantVariantShare: shownVariants[0]?.frequency ?? 0,
@@ -1482,29 +1516,47 @@ function _resolveDetailFocusScope(anchorEntity, filteredSeedEvents, seedEventIds
   const isCaseAnchor = anchorEntity.primary_type === _store.caseType;
   if (!isItemAnchor && !isCaseAnchor) return null;
 
-  // The focus set is every entity the view is anchored on — the anchor plus
-  // any compared peers (e.g., the top-N cases in a variant compare). All of
-  // them must be kept as context entities, not just the anchor, otherwise the
-  // peer cases vanish from the bands.
   const focusSet = focusEntityIds ? new Set(focusEntityIds) : new Set([anchorEntity.entity_id]);
   focusSet.add(anchorEntity.entity_id);
   const contextEntityIds = new Set(focusSet);
+  const visibleEventIds = new Set(seedEventIds);
+
+  // Add every entity correlated to the anchor's events (Resources, Offers, etc.)
+  // so they all appear as bands, but visibleEventIds keeps them scoped to the trace.
   filteredSeedEvents.forEach(event => {
-    (event.memberships ?? []).forEach(membership => {
-      if (focusSet.has(membership.entity_id)) {
-        contextEntityIds.add(membership.entity_id);
-      } else if (isItemAnchor && membership.entity_type === _store.caseType) {
-        contextEntityIds.add(membership.entity_id);
-      } else if (isCaseAnchor && membership.entity_type === _store.itemType) {
-        contextEntityIds.add(membership.entity_id);
-      }
+    (event.memberships ?? []).forEach(membership => contextEntityIds.add(membership.entity_id));
+  });
+
+  // Expand via structural relations to find item-type entities that may not share
+  // corr edges with the anchor (e.g. BPIC17: Workflow is linked to Application via
+  // CASE_AW but its events are not directly correlated to Application).
+  const expandBase = new Set(focusSet);
+  expandBase.forEach(entityId => {
+    (_store.relationsByEntityId[entityId] ?? []).forEach(relation => {
+      const otherId = relation.source_entity_id === entityId
+        ? relation.target_entity_id
+        : relation.source_entity_id;
+      const other = _store.entityById[otherId];
+      if (!other) return;
+      if (isCaseAnchor && other.primary_type === _store.itemType) contextEntityIds.add(otherId);
+      if (isItemAnchor && other.primary_type === _store.caseType) contextEntityIds.add(otherId);
     });
   });
+
+  // Include item-type entities' own events so their band is populated even when
+  // those events have no direct corr edge to the case anchor.
+  if (isCaseAnchor) {
+    contextEntityIds.forEach(entityId => {
+      if (_store.entityById[entityId]?.primary_type === _store.itemType) {
+        (_store.eventsByEntityId[entityId] ?? []).forEach(ev => visibleEventIds.add(ev.event_id));
+      }
+    });
+  }
 
   return {
     scope: isItemAnchor ? "item-focus" : "case-focus",
     contextEntityIds,
-    visibleEventIds: new Set(seedEventIds),
+    visibleEventIds,
   };
 }
 
@@ -1777,17 +1829,62 @@ function _summarizeDetailGraph(bands, eventAnchors, relations, anchorEntity, com
 }
 
 function _collectItemSequences(filters = {}) {
-  const itemIds = (_store.entityIdsByType[_store.itemType] ?? []).filter(entityId => !filters.itemIds || filters.itemIds.has(entityId));
-  return itemIds.map(entityId => {
-    const events = _filterEvents(_store.eventsByItemId[entityId] ?? [], filters).sort(_compareEvents);
+  return _collectEntitySequences(filters.variantEntityType || _store.itemType, filters);
+}
+
+// Builds one activity sequence (trace) per entity of `entityType` — the basis of
+// process-variant computation. Generalised from the old item-only version so
+// variants can be scoped to ANY sequence-bearing entity type. For the default
+// item type we keep the richer eventsByItemId map (which folds in DF-edge
+// participants); any other type reads the generic per-entity event index.
+function _collectEntitySequences(entityType, filters = {}) {
+  const useItemMap = entityType === _store.itemType;
+  const ids = (_store.entityIdsByType[entityType] ?? []).filter(entityId => !filters.itemIds || filters.itemIds.has(entityId));
+  return ids.map(entityId => {
+    const source = useItemMap ? (_store.eventsByItemId[entityId] ?? []) : (_store.eventsByEntityId[entityId] ?? []);
+    const events = _filterEvents(source, filters).sort(_compareEvents);
     if (!events.length) return null;
     const eventById = Object.fromEntries(events.map(event => [event.event_id, event]));
     const dfEdges = (_store.dfByEntityId[entityId] ?? []).filter(edge => eventById[edge.source_event_id] && eventById[edge.target_event_id]);
     const traced = _traceEntityPath(events, dfEdges, eventById);
     const sequence = traced.eventIds.map(eventId => eventById[eventId]?.activity).filter(Boolean);
     if (!_sequencePassesActivityFilter(sequence, filters.activities)) return null;
-    return { entityId, caseId: events[0]?.case_entity_id ?? null, sequence, eventIds: traced.eventIds };
+    const corrCaseId = events[0]?.case_entity_id ?? null;
+    const caseId = corrCaseId ?? (_store.relationsByEntityId[entityId] ?? [])
+      .map(rel => rel.source_entity_id === entityId ? rel.target_entity_id : rel.source_entity_id)
+      .find(otherId => _store.entityById[otherId]?.primary_type === _store.caseType)
+      ?? null;
+    return { entityId, caseId, sequence, eventIds: traced.eventIds };
   }).filter(Boolean);
+}
+
+// Entity types whose entities form sequences of events (a directly-follows path,
+// or simply more than one event) — the only types for which process variants are
+// meaningful. Returned sorted by sequence-bearing entity count desc, then name.
+export function getSequenceEntityTypes() {
+  if (!_store) return [];
+  const reg = _store.typeRegistry;
+  const meta = {};
+  (reg?.types ?? []).forEach(t => { meta[t.name] = { displayLabel: t.displayLabel ?? t.name, color: t.color ?? "#64748b" }; });
+  const out = [];
+  Object.entries(_store.entityIdsByType ?? {}).forEach(([type, ids]) => {
+    let sequenceCount = 0;
+    (ids ?? []).forEach(entityId => {
+      const dfLen = _store.dfByEntityId?.[entityId]?.length ?? 0;
+      const evLen = _store.eventsByEntityId?.[entityId]?.length ?? 0;
+      if (dfLen >= 1 || evLen >= 2) sequenceCount += 1;
+    });
+    if (sequenceCount > 0) {
+      out.push({
+        type,
+        displayLabel: meta[type]?.displayLabel ?? type,
+        color: meta[type]?.color ?? "#64748b",
+        entityCount: (ids ?? []).length,
+        sequenceCount,
+      });
+    }
+  });
+  return out.sort((a, b) => b.sequenceCount - a.sequenceCount || a.type.localeCompare(b.type));
 }
 
 // Centralised event filter — single chokepoint for activity, resource, date
