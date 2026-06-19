@@ -2,7 +2,7 @@
 
 import { loadDataset, loadManifest, datasetUrl, datasetFromQuery } from "./data/loader.js";
 import {
-  buildStore, getStore, getVariantOverview, getEkgView,
+  buildStore, getStore, getVariantOverview, getAllVariantOverview, getEkgView,
   getActivityDfGraph, getDetailGraph, getGlobalSharedEventHotspots, getSharedEventTimeBuckets, getEntitiesForHotspot,
   buildEntityTimelineRows, getSequenceEntityTypes,
 } from "./data/store.js";
@@ -37,6 +37,13 @@ let _manifest = { datasets: [] };
 let _lastTotalHeight = 0;
 let _detailGraph = null;
 let _variantData = null;
+// Same-variant comparison plan for the focused T2 entity (origin + top peers
+// sharing its exact trace). Recomputed per identify render; consumed by the
+// "Compare same-variant traces" action. null when the entity has no peer trace.
+// _detailVariantPlanKey memoizes it by entity + activity filter so cheap
+// re-renders (e.g. lane-expansion toggles) don't recompute the full variant set.
+let _detailVariantPlan = null;
+let _detailVariantPlanKey = null;
 let _selection = null;
 let _entitySearchQuery = "";
 let _lastListKey = null;
@@ -160,6 +167,8 @@ function _afterLoad(store, name) {
   _accentMap = {};
   _detailGraph = null;
   _variantData = null;
+  _detailVariantPlan = null;
+  _detailVariantPlanKey = null;
   _selection = null;
   _entitySearchQuery = "";
   _lastListKey = null;
@@ -237,7 +246,15 @@ function _renderLayers(route, store) {
   const lDf    = gRoot.append("g").attr("class", "l-df");
   const lNodes = gRoot.append("g").attr("class", "l-nodes");
   const lLabels= gRoot.append("g").attr("class", "l-labels");
-  const w = svg.node().clientWidth;
+  // Lay out against the actual viewport (the scroll container), NOT the SVG's
+  // own width — the SVG width is set to the content size by _setDocumentCanvas
+  // on each render, so reading it here would feed back a stale/oversized width
+  // (and overflow horizontally when the sidebar is open). canvas-wrap always
+  // reflects the true available width for the current sidebar state.
+  const w = Math.max(
+    document.getElementById("canvas-wrap")?.clientWidth || svg.node().clientWidth || 0,
+    1
+  );
   const cb = _makeCallbacks(route);
   const labels = { caseType: store.caseType ?? "Case", itemType: store.itemType ?? "Item", caseBadge: (store.caseType ?? "CA").slice(0, 2).toUpperCase() };
 
@@ -443,10 +460,17 @@ function _renderCompareDetail(route, store, w, lBg, lMeta, lRel, lCorr, lDf, lNo
   const activeVariantType = _resolveVariantEntityType(getSequenceEntityTypes());
   if (route.params.variant) {
     try {
-      const variantData = (_variantData && _variantData.itemType === activeVariantType)
-        ? _variantData
-        : getVariantOverview({ activities: _filters.activities, variantEntityType: activeVariantType });
-      const v = variantData.variants.find(x => x.key === route.params.variant);
+      // Try the cached top-share overview first (the variants screen populates
+      // it); if the requested key isn't among those shown — e.g. a rare trace
+      // opened from T2's "Compare same-variant traces" — fall back to the FULL
+      // variant set so the key still resolves and the scope applies.
+      const cached = (_variantData && _variantData.itemType === activeVariantType) ? _variantData : null;
+      let variantData = cached;
+      let v = cached?.variants.find(x => x.key === route.params.variant) ?? null;
+      if (!v) {
+        variantData = getAllVariantOverview({ activities: _filters.activities, variantEntityType: activeVariantType });
+        v = variantData.variants.find(x => x.key === route.params.variant) ?? null;
+      }
       if (v) {
         // We compare the lens entities themselves, so the chart shows exactly
         // the entities in the URL — not every item of the variant. This keeps
@@ -711,16 +735,11 @@ function _highlightAnchorLane(anchorId) {
 }
 
 function _applyAccentLanes(accentMap) {
-  gRoot.selectAll(".entity-lane").each(function() {
-    const id = d3.select(this).attr("data-entity-id");
-    const color = accentMap[id];
-    if (color) {
-      d3.select(this).select(".lane-track")
-        .style("stroke", color)
-        .style("stroke-width", "2px")
-        .style("opacity", "0.7");
-    }
-  });
+  // Intentionally does NOT recolor the comparison peers' lanes: only the origin
+  // (anchor) lane is visually distinguished, via the .anchor-lane highlight, so
+  // the analyst can see where they started from. The peers keep their normal
+  // appearance. accentMap is still consumed by the compare-strip legend swatches.
+  void accentMap;
 }
 
 function _highlightFocusedCluster(clusterId) {
@@ -1694,6 +1713,9 @@ function _updateDetailPanels(detailGraph) {
     summaryContent.innerHTML = `<div class="stat-row"><span class="stat-label">Open any entity to inspect a typed EKG slice.</span></div>`;
     sharedList.innerHTML = `<div class="empty-note">Shared events will appear here in detail view.</div>`;
     document.getElementById("entity-type-list").innerHTML = "";
+    _detailVariantPlan = null;
+    _detailVariantPlanKey = null;
+    _renderDetailActions();
     return;
   }
   const s = detailGraph.summary;
@@ -1723,6 +1745,113 @@ function _updateDetailPanels(detailGraph) {
       kind: "event", eventId: el.dataset.eventId,
       relatedEntityIds: detailGraph.sharedEvents.find(x => x.event_id === el.dataset.eventId)?.sharedEntityIds ?? [],
     }));
+  });
+
+  // The cross-task action buttons depend on this entity's variant. Recompute
+  // the plan only when the entity or activity filter actually changes (memoised
+  // so lane-expansion toggles don't re-run the full variant pass). Only T2.
+  const _route = getRoute();
+  if (_route.name === "identify" && _route.params.entity) {
+    const actsSig = _filters.activities ? [..._filters.activities].sort().join("|") : "*";
+    const planKey = `${_route.params.entity}::${actsSig}`;
+    if (planKey !== _detailVariantPlanKey) {
+      _detailVariantPlan = _computeSameVariantPlan(_route.params.entity);
+      _detailVariantPlanKey = planKey;
+    }
+  } else {
+    _detailVariantPlan = null;
+    _detailVariantPlanKey = null;
+  }
+  _renderDetailActions();
+}
+
+// Resolves the process variant (activity-sequence class) the focused entity
+// belongs to — scoped to its OWN entity type as the variant lens — and returns
+// the top peer entities sharing that exact trace. Drives the T2 "Compare
+// same-variant traces" action: it opens T3 with this entity as the distinctly
+// highlighted anchor (entities[0]) and its same-variant peers as the accented
+// comparison set. Returns null when the entity is not sequence-bearing or is
+// alone in its variant (nothing to compare against).
+function _computeSameVariantPlan(entityId) {
+  if (!entityId) return null;
+  let store;
+  try { store = getStore(); } catch { return null; }
+  const entity = store?.entityById?.[entityId];
+  if (!entity) return null;
+  const entityType = entity.primary_type;
+  if (!getSequenceEntityTypes().some(t => t.type === entityType)) return null;
+  let overview;
+  try {
+    // Same filters the compare screen applies (active activity filter + the
+    // entity's own type as lens), and the FULL variant set so even a rare
+    // trace resolves to a key that compare can re-find.
+    overview = getAllVariantOverview({ activities: _filters.activities, variantEntityType: entityType });
+  } catch { return null; }
+  const variant = (overview.variants ?? []).find(v => (v.items ?? []).some(it => it.id === entityId));
+  if (!variant) return null;
+  const peers = (variant.items ?? [])
+    .map(it => it.id)
+    .filter(id => id !== entityId)
+    .slice(0, 3);
+  return { entityType, variantKey: variant.key, variantRank: variant.rank, instanceCount: variant.count, peers };
+}
+
+// The activity to seed T4's "Explore activity shared events" action with. A
+// selected event names it directly; otherwise fall back to a cluster-activity
+// context carried over from a previous T4 drill-in. null = nothing selected.
+function _selectedActivityForExplore() {
+  if (_selection?.kind === "event" && _selection.eventId != null) {
+    let store;
+    try { store = getStore(); } catch { store = null; }
+    const ev = store?.eventById?.[_selection.eventId] ?? store?.eventById?.[String(_selection.eventId)];
+    if (ev?.activity) return ev.activity;
+  }
+  if (_clusterActivityContext?.selectedActivity) return _clusterActivityContext.selectedActivity;
+  return null;
+}
+
+// Renders the two cross-task action buttons in the T2 sidebar. Idempotent and
+// cheap: reads the cached variant plan (button 1) and the live selection
+// (button 2), so it can be called both on full render and on selection change.
+function _renderDetailActions() {
+  const container = document.getElementById("detail-actions");
+  if (!container) return;
+  const route = getRoute();
+  const entityId = route.params.entity;
+  if (route.name !== "identify" || !entityId) { container.innerHTML = ""; return; }
+
+  const plan = _detailVariantPlan;
+  const canCompare = Boolean(plan && plan.peers.length);
+  const compareTitle = canCompare
+    ? `Compare this ${plan.entityType} against the top ${plan.peers.length} other ${plan.entityType}${plan.peers.length === 1 ? "" : "s"} sharing its exact trace (variant ${plan.variantRank} — ${plan.instanceCount} instances). This entity opens highlighted as the origin.`
+    : (plan ? "No other entity shares this entity's exact trace." : "This entity has no comparable trace to group into a variant.");
+
+  const activity = _selectedActivityForExplore();
+  const canExplore = Boolean(activity);
+  const activityLabel = activity && activity.length > 22 ? `${activity.slice(0, 21)}…` : activity;
+  const exploreLabel = canExplore ? `Explore “${activityLabel}” shared events` : "Explore activity shared events";
+  const exploreTitle = canExplore
+    ? `Open T4 (Explore) scoped to the shared events of “${activity}”.`
+    : "Select an event on the canvas (or in an expanded table) to explore its activity's shared events.";
+
+  container.innerHTML = `
+    <div class="detail-actions-label">Cross-task actions</div>
+    <button type="button" class="btn btn-sm detail-action-btn" id="btn-compare-same-variant" ${canCompare ? "" : "disabled"} title="${_escAttr(compareTitle)}">Compare same-variant traces</button>
+    <button type="button" class="btn btn-sm detail-action-btn" id="btn-explore-activity" ${canExplore ? "" : "disabled"} title="${_escAttr(exploreTitle)}">${_escHtml(exploreLabel)}</button>
+    ${canExplore ? "" : `<div class="detail-actions-hint">Select an event to enable activity exploration.</div>`}
+  `;
+
+  container.querySelector("#btn-compare-same-variant")?.addEventListener("click", () => {
+    if (!plan || !plan.peers.length) return;
+    // Align the compare screen's variant lens with this entity's type so the
+    // variant key we pass resolves there exactly as it did here.
+    _filters.variantEntityType = plan.entityType;
+    navigate("compare", { entities: [entityId, ...plan.peers].join(","), variant: plan.variantKey });
+  });
+  container.querySelector("#btn-explore-activity")?.addEventListener("click", () => {
+    const act = _selectedActivityForExplore();
+    if (!act) return;
+    navigate("explore", { cluster: `act:${act}` });
   });
 }
 
@@ -2110,12 +2239,21 @@ function _applySelectionState() {
   const dfHalos  = gRoot.selectAll(".df-link-bottleneck-halo");
   const lanes    = gRoot.selectAll(".entity-lane");
   const corrLinks = gRoot.selectAll(".corr-link");
+  // Event spines (vertical lines + axis dots) link a shared event to every
+  // swim-lane it appears in; tableRows are the per-entity expanded-table rows.
+  const spines   = gRoot.selectAll(".event-spine, .event-spine-node");
+  const tableRows = gRoot.selectAll(".let-row");
   anchors.classed("highlighted", false).classed("dimmed", false);
   markers.classed("highlighted", false).classed("dimmed", false);
   dfEdges.classed("edge-highlighted", false).classed("edge-dimmed", false);
   dfHalos.classed("edge-highlighted", false).classed("edge-dimmed", false);
   lanes.classed("item-highlighted", false).classed("item-dimmed", false);
   corrLinks.classed("edge-highlighted", false).classed("edge-dimmed", false);
+  spines.classed("spine-highlighted", false).classed("spine-dimmed", false);
+  tableRows.classed("row-selected", false);
+  // The "Explore activity shared events" button keys off the current selection,
+  // so refresh it whenever selection changes (no full re-render happens here).
+  _renderDetailActions();
   if (!_selection) return;
   if (_selection.kind === "event" || _selection.kind === "event-cluster") {
     const selIds = new Set((_selection.kind === "event" ? [_selection.eventId] : (_selection.eventIds ?? [])).map(id => String(id)));
@@ -2128,6 +2266,11 @@ function _applySelectionState() {
          .classed("item-dimmed",      function() { return related.size ? !related.has(d3.select(this).attr("data-entity-id")) : false; });
     corrLinks.classed("edge-highlighted", function() { return selIds.has(d3.select(this).attr("data-event-id")); })
              .classed("edge-dimmed",      function() { return !selIds.has(d3.select(this).attr("data-event-id")); });
+    // Light up the spine connecting the selected event across its lanes, and
+    // dim the others so the connection reads clearly.
+    spines.classed("spine-highlighted", function() { return selIds.has(d3.select(this).attr("data-event-id")); })
+          .classed("spine-dimmed",      function() { return !selIds.has(d3.select(this).attr("data-event-id")); });
+    tableRows.classed("row-selected", function() { return selIds.has(d3.select(this).attr("data-event-id")); });
   } else if (_selection.kind === "edge") {
     const activeEvts = new Set([_selection.sourceId, _selection.targetId].map(id => String(id)));
     anchors.classed("highlighted", function() { return _datumIntersectsEvents(d3.select(this.parentNode).datum(), activeEvts); })
@@ -2152,7 +2295,7 @@ function _datumIntersectsEvents(datum, eventIds) {
 // ── Camera ────────────────────────────────────────────────────────────────────
 function _fitToView(totalHeight, options = {}) {
   if (!svg) return;
-  _setDocumentCanvas(totalHeight, { scrollTop: options.scrollTop ?? true });
+  _setDocumentCanvas(totalHeight, { scrollTop: options.scrollTop ?? true, fitWidth: options.fitWidth ?? false });
 }
 
 function _fitCurrentView() {
@@ -2167,11 +2310,14 @@ function _fitCurrentView() {
 }
 
 function _fitVariantView() {
-  _fitToView(_lastTotalHeight, { alignTop: true, alignLeft: true, minScale: 0.32, padX: 28, padY: 24, preferWidth: true, lockZoomFloor: true });
+  // Fit the full width into the viewport so no horizontal scrolling is needed.
+  _fitToView(_lastTotalHeight, { fitWidth: true });
 }
 
 function _fitDetailView() {
-  _fitToView(_lastTotalHeight, { alignTop: true, alignLeft: true, minScale: 0.34, padX: 28, padY: 26, preferWidth: true, lockZoomFloor: true });
+  // Fit the full timeline width into the viewport — completely visible without
+  // horizontal scrolling, whatever the sidebar state or number of events.
+  _fitToView(_lastTotalHeight, { fitWidth: true });
 }
 
 
@@ -2199,8 +2345,36 @@ function _setDocumentCanvas(totalHeight, options = {}) {
 
   const viewportW = Math.max(wrap.clientWidth || svgNode.clientWidth || 900, 1);
   const viewportH = Math.max(wrap.clientHeight || svgNode.clientHeight || 600, 1);
-  const contentW = bounds ? Math.ceil(bounds.x + bounds.width + 48) : viewportW;
-  const contentH = bounds ? Math.ceil(bounds.y + bounds.height + 48) : (totalHeight ?? viewportH);
+  const contentRight  = bounds ? bounds.x + bounds.width  : viewportW;
+  const contentBottom = bounds ? bounds.y + bounds.height : (totalHeight ?? viewportH);
+
+  if (options.fitWidth) {
+    // Pin the SVG box to the viewport width (so a horizontal scrollbar can
+    // never appear) and scale the scene DOWN — never up — by exactly enough to
+    // bring its full width inside the viewport. The layout already targets the
+    // viewport width, so the scale is ~1 normally; it only kicks in on narrow
+    // viewports where a minimum-width floor would otherwise overflow. Result:
+    // the timeline is always fully visible regardless of sidebar state or the
+    // number of events.
+    const PAD_R = 10;
+    const scale = Math.min(1, viewportW / Math.max(contentRight + PAD_R, 1));
+    const height = Math.max(viewportH, Math.ceil(contentBottom * scale + 24));
+    svg
+      .attr("width", viewportW)
+      .attr("height", height)
+      .style("width", `${viewportW}px`)
+      .style("height", `${height}px`);
+    currentTransform = d3.zoomIdentity.scale(scale);
+    gRoot.style("transform", `translate(0px,0px) scale(${scale})`);
+    // Let the fit scale be the zoom floor so reset/constrain treat "fully
+    // visible" as the most-zoomed-out state instead of snapping wider again.
+    _minZoomScale = Math.min(ZOOM_MIN_SCALE, scale);
+    if (options.scrollTop) wrap.scrollTo({ left: 0, top: 0, behavior: "auto" });
+    return;
+  }
+
+  const contentW = bounds ? Math.ceil(contentRight + 48) : viewportW;
+  const contentH = bounds ? Math.ceil(contentBottom + 48) : (totalHeight ?? viewportH);
   const width = Math.max(viewportW, contentW);
   const height = Math.max(viewportH, Math.ceil(totalHeight ?? 0), contentH);
 

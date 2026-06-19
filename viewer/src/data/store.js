@@ -467,7 +467,7 @@ export function buildStore(bundle) {
   const allActivities = [...new Set(events.map(event => event.activity).filter(Boolean))].sort((a, b) => a.localeCompare(b));
   const allResources = [...new Set(events.flatMap(event => event.resource_labels ?? []).filter(_isMeaningfulResource))]
     .sort((a, b) => a.localeCompare(b));
-  const activityColorByName = _buildColorMap(allActivities, ACTIVITY_PALETTE);
+  const activityColorByName = _buildActivityColorMap(allActivities);
   const resourceColorByName = _buildColorMap(allResources, RESOURCE_PALETTE, "#94a3b8");
   const activityEventCount = {};
   allActivities.forEach(a => { activityEventCount[a] = 0; });
@@ -2470,6 +2470,39 @@ function _buildColorMap(values, palette, fallback = null) {
   const map = {};
   values.forEach((value, index) => {
     map[value] = palette[index] ?? fallback ?? _hashColor(value);
+  });
+  return map;
+}
+
+// Activity colors must stay distinct even with many activities. The curated
+// ACTIVITY_PALETTE only has a dozen entries, and the old _hashColor fallback
+// gave near-identical hues to similarly-named activities (e.g. the "SRM: …"
+// family), which also tend to occur close together in time — so adjacent
+// events looked the same color.
+//
+// For larger sets we instead walk the hue wheel by the golden angle (~137.5°).
+// Successive activities land far apart on the wheel regardless of name, and
+// the sequence still covers the spectrum evenly as it wraps. Saturation and
+// lightness rotate through tiers on each wrap so colors that eventually land
+// near the same hue are still separated by brightness. Assignment is by
+// position in the (sorted) activity list, so it stays stable for a dataset.
+function _buildActivityColorMap(values) {
+  // Small sets keep the hand-tuned, high-contrast palette as-is.
+  if (values.length <= ACTIVITY_PALETTE.length) {
+    return _buildColorMap(values, ACTIVITY_PALETTE);
+  }
+  const GOLDEN_ANGLE = 137.508;
+  const SAT_TIERS = [70, 58, 78, 50];
+  const LIGHT_TIERS = [48, 38, 58, 44];
+  const map = {};
+  values.forEach((value, index) => {
+    const hue = (index * GOLDEN_ANGLE) % 360;
+    // Rotate the brightness tier every index. The golden-angle walk only
+    // returns near a previous hue after a Fibonacci-sized gap (3, 8, 11, 19…),
+    // none of which is a multiple of 4 — so any near-hue pair lands on a
+    // different tier and stays distinguishable by brightness.
+    const tier = index % SAT_TIERS.length;
+    map[value] = `hsl(${hue.toFixed(1)} ${SAT_TIERS[tier]}% ${LIGHT_TIERS[tier]}%)`;
   });
   return map;
 }

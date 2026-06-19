@@ -701,6 +701,23 @@ body {
 .entity-lane.item-highlighted { stroke: rgba(37,99,235,0.4); stroke-width: 1px; }
 .entity-lane.item-dimmed { opacity: 0.28; }
 
+/* Event spine = the vertical line (plus its axis dot) linking a shared event
+   to each swim-lane it appears in. Lit when the event is selected so the
+   cross-lane connection is obvious; dimmed for non-selected spines. */
+.event-spine,
+.event-spine-node { transition: opacity 0.15s, stroke 0.15s, stroke-width 0.15s, stroke-opacity 0.15s; }
+.event-spine.spine-highlighted {
+  stroke: rgba(37,99,235,0.85) !important;
+  stroke-width: 2.6px !important;
+  stroke-opacity: 0.95 !important;
+}
+.event-spine-node.spine-highlighted {
+  stroke: rgba(37,99,235,0.9);
+  stroke-width: 2px;
+}
+.event-spine.spine-dimmed,
+.event-spine-node.spine-dimmed { opacity: 0.12; }
+
 .df-link,
 .corr-link,
 .relation-link { transition: opacity 0.15s, stroke-width 0.15s; }
@@ -900,6 +917,45 @@ body {
   color: var(--text-inv-muted);
   font-size: 10px;
   line-height: 1.55;
+}
+
+/* Cross-task action buttons in the T2 Detail Summary panel (Compare
+   same-variant traces → T3, Explore activity shared events → T4). */
+.detail-actions {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid rgba(148, 163, 184, 0.22);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.detail-actions:empty {
+  margin-top: 0;
+  padding-top: 0;
+  border-top: none;
+}
+.detail-actions-label {
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-inv-muted, rgba(255,255,255,0.55));
+}
+.detail-action-btn {
+  width: 100%;
+  text-align: left;
+  white-space: normal;
+  line-height: 1.3;
+}
+.detail-action-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.detail-actions-hint {
+  font-size: 10.5px;
+  font-style: italic;
+  color: var(--text-inv-muted, rgba(255,255,255,0.55));
+  line-height: 1.4;
 }
 
 .variant-summary-actions {
@@ -3849,8 +3905,14 @@ body[data-route="explore"]:not([data-explore-drilled="true"]) .screen-host {
 
 /* ── Anchor-lane highlight ────────────────────────────────────────────────── */
 
-.entity-lane.anchor-lane { }
-.entity-lane.anchor-lane .lane-track { stroke: rgba(37,99,235,0.55) !important; stroke-width: 2.5px !important; }
+/* Origin/anchor lane — the entity the view is focused on (T2) or the entity a
+   same-variant comparison started from (T3). Highlighted directly on the lane
+   rect so the analyst can always see "where they started from". */
+.entity-lane.anchor-lane {
+  stroke: rgba(37,99,235,0.85) !important;
+  stroke-width: 2.2px !important;
+  fill: rgba(37,99,235,0.08) !important;
+}
 
 /* ── Focused cluster ──────────────────────────────────────────────────────── */
 
@@ -4720,6 +4782,21 @@ body[data-route="explore"]:not([data-explore-drilled="true"]) .screen-host {
 }
 .lane-expanded-table tbody tr:last-child td {
   border-bottom: none;
+}
+/* Rows are clickable: clicking selects the row's event, lighting up its
+   marker(s) and the spine that connects it across swim-lanes. */
+.lane-expanded-table tbody tr.let-row {
+  cursor: pointer;
+  transition: background 0.12s;
+}
+.lane-expanded-table tbody tr.let-row:hover td {
+  background: rgba(37, 99, 235, 0.07);
+}
+.lane-expanded-table tbody tr.let-row.row-selected td {
+  background: rgba(37, 99, 235, 0.16);
+}
+.lane-expanded-table tbody tr.let-row.row-selected .let-activity {
+  color: rgba(29, 78, 216, 0.95);
 }
 .lane-expanded-table .let-activity {
   font-weight: 600;

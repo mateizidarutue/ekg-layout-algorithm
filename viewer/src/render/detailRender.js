@@ -58,6 +58,7 @@ export function drawDetailView(layout, lBg, lMeta, lDfPo, lCorr, lRes, lDfItem, 
   // Event spines: one vertical colored line per shared event, axis → lowest correlated lane
   lMeta.selectAll(null).data(layout.sharedGuides).join("line")
     .attr("class", "event-spine")
+    .attr("data-event-id", d => d.event_id)
     .attr("x1", d => d.x).attr("y1", d => d.y1)
     .attr("x2", d => d.x).attr("y2", d => d.y2)
     .attr("stroke", d => d.activityColor)
@@ -71,6 +72,7 @@ export function drawDetailView(layout, lBg, lMeta, lDfPo, lCorr, lRes, lDfItem, 
   // Small event-node dot on the axis for each spine — clickable to select the shared event
   lMeta.selectAll(null).data(layout.sharedGuides).join("circle")
     .attr("class", "event-spine-node")
+    .attr("data-event-id", d => d.event_id)
     .attr("cx", d => d.x).attr("cy", d => d.y1)
     .attr("r", 4.5)
     .attr("fill", d => d.activityColor)
@@ -394,7 +396,22 @@ function _drawLaneExpansion(lane, laneColor, lNodes, cb) {
     .forEach(label => thead.append("xhtml:th").text(label));
   const tbody = table.append("xhtml:tbody");
   rows.forEach(row => {
-    const tr = tbody.append("xhtml:tr");
+    const tr = tbody.append("xhtml:tr")
+      .attr("class", "let-row")
+      .attr("data-event-id", row.event_id)
+      .attr("data-entity-id", lane.entity_id);
+    // Clicking a row selects its event: the marker(s) for that event light up
+    // across every lane it appears in, and the spine connecting those lanes
+    // lights up too (handled by the shared selection state). syncDegree > 1
+    // means the event is correlated to other entities, so pass those ids as
+    // the related set; otherwise the event lives only in this lane.
+    tr.on("click", ev => {
+      ev.stopPropagation();
+      const relatedEntityIds = row.syncDegree > 1
+        ? row.correlatedEntities.map(ent => ent.entity_id)
+        : [lane.entity_id];
+      cb.onEventSelect?.({ id: row.event_id, sharedEntityIds: relatedEntityIds });
+    });
     tr.append("xhtml:td").attr("class", "let-activity").text(row.activity);
     tr.append("xhtml:td").attr("class", "let-time").text(_formatTimestamp(row.date));
     tr.append("xhtml:td")
