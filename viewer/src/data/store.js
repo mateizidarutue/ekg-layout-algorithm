@@ -313,16 +313,19 @@ function _detectCaseItemLens(store) {
     };
   }
 
-  // CASE_* reified relations (BPIC17-style): the FROM side (source) is the case entity
-  // (it has more events per entity and drives the overview), the TO side (target) is
-  // the item entity whose event sequences are compared in T3.
-  // For CASE_AW: Workflow (source, W_ events) is case; Application (target, A_ events) is item.
+  // CASE_* reified relations (BPIC17-style): the relation links a sub-process
+  // (source, e.g. Workflow) to the case object that owns it (target, e.g.
+  // Application). The case object is the primary entity; its sub-process is the
+  // item whose event sequences are compared in T3. Most events correlate only to
+  // the sub-process, so they are re-attributed to the owning case through this
+  // same relation in _applyCaseReattribution (built by _buildCaseReattributionMap).
+  // For CASE_AW: Application (target) is the case; Workflow (source) is the item.
   const reifiedCandidates = (store.relations ?? []).filter(edge => /^CASE_/.test(edge.relation_type));
   if (reifiedCandidates.length) {
     const preferred = reifiedCandidates.find(edge => edge.relation_type === "CASE_AW") ?? reifiedCandidates[0];
     return {
-      caseType: preferred.source_entity_type,
-      itemType: preferred.target_entity_type,
+      caseType: preferred.target_entity_type,
+      itemType: preferred.source_entity_type,
     };
   }
 
@@ -340,6 +343,43 @@ function _detectCaseItemLens(store) {
     caseType: candidates[0] ?? "Case",
     itemType: candidates[1] ?? candidates[0] ?? "Item",
   };
+}
+
+// For reified CASE_* lenses the case object (e.g. Application) is linked to its
+// sub-process (e.g. Workflow) only by a structural relation, never by event
+// correlations — an event correlates to one or the other, not both. This maps
+// each item (sub-process) entity id to its owning case entity id so that events
+// which correlate only to the item can still be attributed to the case. Returns
+// an empty map for HAS_ITEM / fallback lenses, where no re-attribution is needed.
+function _buildCaseReattributionMap(relations, caseType, itemType) {
+  const map = new Map();
+  if (caseType === itemType) return map;
+  (relations ?? []).forEach(rel => {
+    if (!/^CASE_/.test(rel.relation_type ?? "")) return;
+    if (rel.source_entity_type === itemType && rel.target_entity_type === caseType) {
+      map.set(rel.source_entity_id, rel.target_entity_id);
+    } else if (rel.target_entity_type === itemType && rel.source_entity_type === caseType) {
+      map.set(rel.target_entity_id, rel.source_entity_id);
+    }
+  });
+  return map;
+}
+
+// Attribute item-only events to their owning case by writing the resolved case id
+// into entity_ids_by_type[caseType]. This feeds the merge key and the case lens
+// WITHOUT touching event.entity_ids / memberships, so synchronization degree is
+// unaffected (the case link is structural, not a correlation). Idempotent, so it
+// is safe to re-run after the post-merge context rebuild.
+function _applyCaseReattribution(events, reattribution, caseType, itemType) {
+  if (!reattribution.size) return;
+  events.forEach(event => {
+    const direct = event.entity_ids_by_type[caseType];
+    if (direct && direct.length) return;          // already on the case directly
+    const itemIds = event.entity_ids_by_type[itemType];
+    if (!itemIds || !itemIds.length) return;
+    const caseId = reattribution.get(itemIds[0]);
+    if (caseId) event.entity_ids_by_type[caseType] = [caseId];
+  });
 }
 
 function _buildCaseLens(store) {
@@ -416,11 +456,16 @@ export function buildStore(bundle) {
   // yet). If a merge happens we rewrite corr/df, reset memberships on the
   // canonical events, then rebuild context maps so every downstream map is
   // already consistent.
-  const { caseType: detectedCaseType } = _detectCaseItemLens({
+  const { caseType: detectedCaseType, itemType: detectedItemType } = _detectCaseItemLens({
     relations,
     df,
     entityIdsByType,
   });
+  // For reified CASE_* lenses, attribute item-only events to their owning case
+  // (via the structural relation) before building the merge key, so the merge
+  // groups by the true case and the lens has full event coverage.
+  const caseReattribution = _buildCaseReattributionMap(relations, detectedCaseType, detectedItemType);
+  _applyCaseReattribution(events, caseReattribution, detectedCaseType, detectedItemType);
   const merge = _computeEventMerge(events, detectedCaseType);
   if (merge.mergedAny) {
     corr = _applyEventMergeToCorr(corr, merge);
@@ -442,6 +487,9 @@ export function buildStore(bundle) {
     Object.keys(maps.eventById).forEach(k => { delete maps.eventById[k]; });
     events.forEach(ev => { maps.eventById[ev.event_id] = ev; });
     maps = _buildContextMaps(events, corr, entities);
+    // The rebuild repopulates entity_ids_by_type from corr only, so re-apply the
+    // structural case re-attribution to keep item-only events on their case.
+    _applyCaseReattribution(events, caseReattribution, detectedCaseType, detectedItemType);
   }
 
   const dfByEntityId = _buildDfByEntity(df);
@@ -1165,6 +1213,63 @@ export function getGlobalSharedEventHotspots({ activities = null, entityTypeFilt
   else hotspots.sort((a, b) => b.eventCount - a.eventCount || a.activity.localeCompare(b.activity));
 
   return hotspots.filter(h => h.eventCount > 0);
+}
+
+// Complete shared-event cluster for one activity: EVERY event of that activity
+// that is shared (correlated to >= minSharedEntities distinct entities) plus ALL
+// the entities that co-participate. Unlike getDetailGraph this is intentionally
+// NOT capped — it backs the T4 cluster-detail statistics, which must describe the
+// whole cluster (and therefore agree with the hotspot summary), not a bounded
+// neighbourhood. Returns a graph shaped for renderExploreClusterDetail:
+//   eventAnchors[] : { event_id, date, activity, sharedEntityIds, sharedEntityTypes }
+//   bands[]        : { entityType, entityLabel, lanes:[{ entity_id, entityLabel }] }
+//   visibleEntityTypes : every type present in the cluster (drives the type filter)
+export function getClusterGraph(clusterId, { dateFrom = null, dateTo = null, visibleEntityTypes = null, minSharedEntities = 2 } = {}) {
+  const empty = { eventAnchors: [], bands: [], visibleEntityTypes: [], activity: null };
+  if (!_store) return empty;
+  const activity = clusterId?.startsWith("act:") ? clusterId.slice(4) : clusterId;
+  const typeFilter = visibleEntityTypes?.length ? new Set(visibleEntityTypes) : null;
+
+  const sharedEvents = _filterEvents(_store.events, { activities: new Set([activity]), dateFrom, dateTo })
+    .filter(event => eventSyncDegree(event) >= minSharedEntities)
+    .sort(_compareEvents);
+
+  // Full universe of entity types in this cluster, independent of the current
+  // visible-type selection, so the type-filter checkboxes always list them all.
+  const allTypes = new Set();
+  sharedEvents.forEach(event => (event.memberships ?? []).forEach(m => allTypes.add(m.entity_type)));
+
+  const eventAnchors = [];
+  const entitiesByType = new Map();
+  sharedEvents.forEach(event => {
+    let memberships = event.memberships ?? [];
+    if (typeFilter) memberships = memberships.filter(m => typeFilter.has(m.entity_type));
+    const ids = [...new Set(memberships.map(m => m.entity_id))];
+    if (ids.length < minSharedEntities) return;  // dropped below threshold after type filter
+    const types = [...new Set(memberships.map(m => m.entity_type))];
+    eventAnchors.push({
+      event_id: event.event_id,
+      date: event.date,
+      activity: event.activity,
+      sharedEntityIds: ids,
+      sharedEntityTypes: types,
+      totalEntityTypes: types,
+    });
+    memberships.forEach(m => {
+      if (!entitiesByType.has(m.entity_type)) entitiesByType.set(m.entity_type, new Set());
+      entitiesByType.get(m.entity_type).add(m.entity_id);
+    });
+  });
+
+  const bands = [...entitiesByType.entries()]
+    .map(([type, idSet]) => ({
+      entityType: type,
+      entityLabel: type,
+      lanes: [...idSet].map(id => ({ entity_id: id, entityLabel: _entityLabel(_store.entityById[id]) })),
+    }))
+    .sort((a, b) => b.lanes.length - a.lanes.length || a.entityType.localeCompare(b.entityType));
+
+  return { eventAnchors, bands, visibleEntityTypes: [...allTypes].sort(), activity };
 }
 
 // ── getEkgView: aggregator for the T1 population view at /summarize ────────

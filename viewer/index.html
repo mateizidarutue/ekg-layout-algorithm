@@ -115,11 +115,7 @@
         <div id="detail-actions" class="detail-actions"></div>
       </div>
 
-      <!-- Variant entity-type lens (compare variants mode) -->
-      <div class="ctrl-group compare-variants-only" id="variant-entity-type-group">
-        <div class="ctrl-label section-label">Variant entity type</div>
-        <div id="variant-entity-type-list" class="variant-type-list"></div>
-      </div>
+      <!-- Variant entity-type lens now lives in the top bar (#topbar-variant-entity). -->
 
       <!-- Variant summary (compare route) -->
       <div class="ctrl-group compare-variants-only" id="variant-summary-panel">
@@ -230,6 +226,12 @@
             <span class="breadcrumb-chip" id="breadcrumb-task"></span>
             <span class="breadcrumb-sep" id="breadcrumb-sep" aria-hidden="true">·</span>
             <span class="breadcrumb-ctx" id="breadcrumb-ctx"></span>
+          </div>
+          <!-- Variant entity-type lens: choose which entity process variants are computed for.
+               Visible only in the Compare (T3) variants view; gated via body[data-route]/[data-compare-mode]. -->
+          <div id="topbar-variant-entity" class="topbar-variant-entity" role="group" aria-label="Compute process variants for entity type">
+            <span class="topbar-variant-label">Variants of</span>
+            <div id="topbar-variant-entity-list" class="topbar-variant-list-bar"></div>
           </div>
         </div>
         <div class="topbar-right">

@@ -11,6 +11,7 @@ export function updateSidebarRoute(route, { compareMode = "variants", exploreDri
   sidebar.setAttribute("data-compare-mode", compareMode);
   sidebar.setAttribute("data-explore-drilled", String(exploreDrilled));
   body.setAttribute("data-route", route.name);
+  body.setAttribute("data-compare-mode", compareMode);
   body.setAttribute("data-explore-drilled", String(exploreDrilled));
 }
 

@@ -3,11 +3,11 @@
 import { loadDataset, loadManifest, datasetUrl, datasetFromQuery } from "./data/loader.js";
 import {
   buildStore, getStore, getVariantOverview, getAllVariantOverview, getEkgView,
-  getActivityDfGraph, getDetailGraph, getGlobalSharedEventHotspots, getSharedEventTimeBuckets, getEntitiesForHotspot,
+  getDetailGraph, getGlobalSharedEventHotspots, getSharedEventTimeBuckets, getClusterGraph,
   buildEntityTimelineRows, getSequenceEntityTypes,
 } from "./data/store.js";
 import { computeDetailLayout } from "./layout/detailLayout.js";
-import { computeVariantLayout, computeDfGraphLayout } from "./layout/overviewLayout.js";
+import { computeVariantLayout } from "./layout/overviewLayout.js";
 import { drawDetailView } from "./render/detailRender.js";
 import { drawVariantOverview } from "./render/overviewRender.js";
 import {
@@ -28,8 +28,6 @@ const opa = { df: 1, corr: 0.22, relations: 0.4 };
 const KEYBOARD_PAN_SPEED = 880;
 const KEYBOARD_ZOOM_RATE = 1.75;
 const TRACKPAD_PAN_THRESHOLD = 80;
-const EXPLORE_ENTITY_LIMIT = 14;
-const EXPLORE_MAX_ENTITIES_PER_TYPE = 18;
 
 // ── App state ─────────────────────────────────────────────────────────────────
 let _currentDatasetName = "library";
@@ -392,35 +390,23 @@ function _renderVariants(route, store, w, lBg, lNodes, lLabels, cb) {
   // otherwise the dataset's default item type if it does, otherwise the
   // top sequence-bearing type. null means "let the store use its default".
   const activeType = _resolveVariantEntityType(sequenceTypes);
-  _renderVariantEntityTypeFilters(sequenceTypes, activeType);
+  _renderVariantEntityTypeTopbar(sequenceTypes, activeType);
   const variantFilters = { activities: _filters.activities, variantEntityType: activeType };
   const variantData = getVariantOverview(variantFilters);
   variantData.variants.forEach(v => { v.isSelected = v.key === selectedVariantKey; });
   const selectedVariant = variantData.variants.find(v => v.key === selectedVariantKey) ?? null;
-  variantData.dfGraph = getActivityDfGraph(variantFilters);
   _variantData = variantData;
 
   const viewportH = svg.node().clientHeight;
+  // The directly-follows / activity-flow graph that used to render below the
+  // variants has been removed, so reserve no vertical space for it (dfgHeight: 0).
   const variantLayout = computeVariantLayout(variantData, w, {
     activityColorByName: store.activityColorByName,
     viewportHeight: viewportH,
+    dfgHeight: 0,
   });
-  const dfInnerW = Math.max(w - 64, 220);
-  const dfInnerH = variantLayout.dfgHeight ?? 200;
-  const rawDf = computeDfGraphLayout(variantData.dfGraph, dfInnerW, dfInnerH);
-  const dfLayout = {
-    ...rawDf,
-    x: 32, y: variantLayout.totalHeight + 34, width: dfInnerW, height: dfInnerH,
-    nodes: rawDf.nodes.map(n => ({ ...n, x: n.x + 32, y: n.y + variantLayout.totalHeight + 34 })),
-    edges: rawDf.edges.map(e => ({
-      ...e,
-      x1: e.x1 + 32, y1: e.y1 + variantLayout.totalHeight + 34,
-      x2: e.x2 + 32, y2: e.y2 + variantLayout.totalHeight + 34,
-      cx: e.cx + 32, cy: e.cy + variantLayout.totalHeight + 34,
-    })),
-  };
-  drawVariantOverview(variantLayout, dfLayout, variantData, lBg, lNodes, lLabels, cb, selectedVariant);
-  _lastTotalHeight = variantLayout.totalHeight + 34 + dfInnerH + 28;
+  drawVariantOverview(variantLayout, variantData, lBg, lNodes, lLabels, cb, selectedVariant);
+  _lastTotalHeight = variantLayout.totalHeight + 28;
   _fitVariantView();
   updateSummarizeSidebar(null);
   _updateVariantPanels(variantData, selectedVariant);
@@ -682,42 +668,28 @@ function _monthBounds(monthKey) {
 
 function _renderExploreDetail(route, store, w, lBg, lMeta, lRel, lCorr, lDf, lNodes, lLabels, cb, clusterId, dateFrom = null, dateTo = null) {
   _updateDetailPanels(null);
-  // focusType is carried from T1 when the user drills in from a focused type.
-  // getEntitiesForHotspot uses it to pick an anchor of that type so the T4
-  // view opens centred on the same type the analyst had highlighted.
-  const focusType = route.params.focusType ?? null;
-  const entityIds = getEntitiesForHotspot(clusterId, { maxEntities: EXPLORE_ENTITY_LIMIT, dateFrom, dateTo, focusType });
-  if (!entityIds.length) {
-    const host = document.getElementById("screen-host");
-    if (host) host.innerHTML = `<div style="padding:48px 32px;color:var(--text-muted,#94a3b8);font-size:14px">No entity data found for this cluster${dateFrom ? " in the selected date range" : ""}.</div>`;
-    return;
-  }
-  const anchorId = entityIds[0];
-  const compareIds = entityIds.slice(1);
-  const maxEntitiesPerType = Number.isFinite(_filters.maxEntitiesPerType)
-    ? _filters.maxEntitiesPerType
-    : EXPLORE_MAX_ENTITIES_PER_TYPE;
-  _detailGraph = getDetailGraph({
-    anchorEntityId: anchorId,
-    compareEntityIds: compareIds,
-    visibleEntityTypes: _filters.visibleEntityTypes ?? undefined,
-    activities: _effectiveDetailActivities(),
-    maxEntitiesPerType,
-    sharedOnly: true,
-    // Shared-event definition: correlated to >=2 entities. The T4 list's
-    // degree-floor control does not apply here — the cluster detail always
-    // shows every shared event for the activity.
-    minSharedEntities: 2,
-    // Date filter carried from T1 — filters which events appear in the
-    // lifecycle timelines so only in-window events are shown.
+  // The cluster-detail screen is aggregate statistics only (no per-entity
+  // lifecycle canvas), so it describes the COMPLETE cluster: every shared event
+  // of this activity plus all co-participating entities — uncapped, so the
+  // numbers match the hotspot summary. The visible-entity-type filter still
+  // applies; the "max entities per type" cap (a rendering aid) does not.
+  const clusterGraph = getClusterGraph(clusterId, {
     dateFrom,
     dateTo,
+    visibleEntityTypes: _filters.visibleEntityTypes ?? undefined,
+    minSharedEntities: 2,
   });
-  const renderGraph = _resolveDetailRenderGraph(_detailGraph);
-  renderExploreClusterDetail(renderGraph);
-  _updateClusterActivityPanel(renderGraph);
-  _syncMaxEntitiesSlider(_detailGraph);
-  _renderEntityTypeFilters(_detailGraph);
+  if (!clusterGraph.eventAnchors.length) {
+    const host = document.getElementById("screen-host");
+    if (host) host.innerHTML = `<div style="padding:48px 32px;color:var(--text-muted,#94a3b8);font-size:14px">No shared events found for this cluster${dateFrom ? " in the selected date range" : ""}.</div>`;
+    _detailGraph = null;
+    return;
+  }
+  _detailGraph = null;  // no bounded lifecycle graph in this aggregate-only view
+  renderExploreClusterDetail(clusterGraph);
+  _updateClusterActivityPanel(clusterGraph);
+  _syncMaxEntitiesSlider(null);            // entity cap doesn't apply to the complete cluster
+  _renderEntityTypeFilters(clusterGraph);
 
   // Use the same date filter when looking up the hotspot summary so
   // the event count shown in the header reflects the filtered window.
@@ -785,7 +757,6 @@ function _makeCallbacks(route) {
       if (current === variantKey) navigate("compare");
       else navigate("compare", { variant: variantKey });
     },
-    onDfExpand: () => _openActivityFlowModal(),
     onActivitySelect: activity => navigate("explore", { cluster: `act:${activity}` }),
     onEntityTypeSelect: type => {
       const s = getStore();
@@ -916,80 +887,6 @@ function _openDatasetModal() {
 
 function _closeDatasetModal() {
   document.getElementById("dataset-modal")?.classList.add("hidden");
-}
-
-function _openActivityFlowModal() {
-  if (!_variantData?.dfGraph) return;
-  const wrap = document.getElementById("canvas-wrap");
-  if (!wrap) return;
-  document.getElementById("activity-flow-modal")?.remove();
-  const modal = document.createElement("div");
-  modal.id = "activity-flow-modal";
-  modal.className = "modal-overlay activity-flow-overlay";
-  modal.innerHTML = `
-    <div class="modal-card activity-flow-card">
-      <div class="modal-header">
-        <span class="modal-title">Activity flow detail</span>
-        <button type="button" class="modal-close" id="btn-close-activity-flow" aria-label="Close">x</button>
-      </div>
-      <div class="activity-flow-modal-body">
-        <svg id="activity-flow-modal-svg" class="activity-flow-modal-svg" aria-label="Expanded activity flow graph"></svg>
-      </div>
-    </div>
-  `;
-  wrap.appendChild(modal);
-  const close = () => modal.remove();
-  modal.addEventListener("click", event => { if (event.target === modal) close(); });
-  modal.querySelector("#btn-close-activity-flow")?.addEventListener("click", close);
-  _drawActivityFlowModal(modal.querySelector("#activity-flow-modal-svg"), _variantData.dfGraph);
-}
-
-function _drawActivityFlowModal(svgEl, dfGraph) {
-  if (!svgEl) return;
-  const width = Math.max(880, svgEl.clientWidth || 980);
-  const height = Math.max(520, svgEl.clientHeight || 560);
-  const layout = computeDfGraphLayout(dfGraph, width - 56, height - 62);
-  const root = d3.select(svgEl)
-    .attr("viewBox", `0 0 ${width} ${height}`)
-    .attr("width", "100%")
-    .attr("height", "100%");
-  root.selectAll("*").remove();
-  const g = root.append("g").attr("transform", "translate(28,34)");
-  const maxEdgeCount = Math.max(...layout.edges.map(edge => edge.count), 1);
-  const maxNodeCount = Math.max(...layout.nodes.map(node => node.count), 1);
-  g.selectAll(".modal-df-edge").data(layout.edges).join("path")
-    .attr("class", "modal-df-edge")
-    .attr("d", d => `M${d.x1},${d.y1} Q${d.cx},${d.cy} ${d.x2},${d.y2}`)
-    .attr("fill", "none")
-    .attr("stroke", "rgba(37,99,235,0.32)")
-    .attr("stroke-width", d => 1.4 + (d.count / maxEdgeCount) * 6)
-    .attr("stroke-linecap", "round");
-  const nodes = g.selectAll(".modal-df-node").data(layout.nodes).join("g")
-    .attr("class", "modal-df-node")
-    .attr("transform", d => `translate(${d.x},${d.y})`);
-  nodes.append("circle")
-    .attr("r", d => 12 + (d.count / maxNodeCount) * 18)
-    .attr("fill", "rgba(37,99,235,0.14)")
-    .attr("stroke", "rgba(37,99,235,0.62)")
-    .attr("stroke-width", 1.6);
-  nodes.append("text")
-    .attr("text-anchor", "middle")
-    .attr("dy", "0.34em")
-    .attr("font-family", "JetBrains Mono, monospace")
-    .attr("font-size", "10px")
-    .attr("font-weight", "800")
-    .attr("fill", "#1e3a8a")
-    .text(d => d.count);
-  g.selectAll(".modal-df-label").data(layout.nodes).join("text")
-    .attr("class", "modal-df-label")
-    .attr("x", d => d.x)
-    .attr("y", d => d.y + 38)
-    .attr("text-anchor", "middle")
-    .attr("font-family", "Inter, system-ui, sans-serif")
-    .attr("font-size", "11px")
-    .attr("font-weight", "650")
-    .attr("fill", "#334155")
-    .text(d => d.label);
 }
 
 // ── Tooltip ───────────────────────────────────────────────────────────────────
@@ -1244,36 +1141,42 @@ function _resolveVariantEntityType(sequenceTypes) {
   return sequenceTypes[0].type;
 }
 
-// Render the single-select "Variant entity type" toggle in the T3 sidebar.
-// Each sequence-bearing type is a chip; clicking one re-scopes the variant
-// distribution to that entity. Clears any stale variant selection on change.
-function _renderVariantEntityTypeFilters(sequenceTypes, activeType) {
-  const container = document.getElementById("variant-entity-type-list");
+// Re-scope process-variant computation to a different entity type (e.g. switch
+// BPIC17 variants between Application and Workflow). Shared by the top-bar
+// toggle. Drops any stale variant selection that belonged to the previous lens.
+function _selectVariantEntityType(type) {
+  if (_filters.variantEntityType === type) return;
+  _filters.variantEntityType = type;
+  const route = getRoute();
+  if (route.params.variant) { navigate("compare", {}); return; }
+  handleRoute(getRoute());
+}
+
+// Render the single-select "Variants of …" toggle in the top bar. Each
+// sequence-bearing entity type is a chip; clicking one re-scopes the whole
+// variant distribution to that entity. Hidden when there is nothing to choose
+// between; visibility per route is handled by CSS (compare / variants view).
+function _renderVariantEntityTypeTopbar(sequenceTypes, activeType) {
+  const container = document.getElementById("topbar-variant-entity-list");
+  const group = document.getElementById("topbar-variant-entity");
   if (!container) return;
   container.innerHTML = "";
   if (!sequenceTypes || sequenceTypes.length <= 1) {
-    // Nothing to choose between — hide the control to avoid a dead toggle.
-    container.closest(".ctrl-group")?.classList.add("is-hidden");
+    if (group) group.style.display = "none";   // dead toggle — keep it out of the bar
     return;
   }
-  container.closest(".ctrl-group")?.classList.remove("is-hidden");
+  if (group) group.style.display = "";          // let the route-gated CSS decide
   sequenceTypes.forEach(({ type, displayLabel, color, sequenceCount }) => {
     const chip = document.createElement("button");
     chip.type = "button";
-    chip.className = "variant-type-chip" + (type === activeType ? " is-active" : "");
+    chip.className = "topbar-variant-chip" + (type === activeType ? " is-active" : "");
     chip.dataset.type = type;
-    chip.innerHTML = `<span class="variant-type-chip__dot" style="background:${color}"></span>`
-      + `<span class="variant-type-chip__label">${displayLabel}</span>`
-      + `<span class="variant-type-chip__count">${sequenceCount}</span>`;
-    chip.addEventListener("click", () => {
-      if (_filters.variantEntityType === type) return;
-      _filters.variantEntityType = type;
-      // The selected variant key belongs to the previous lens — drop it so we
-      // don't land on a non-existent variant under the new entity type.
-      const route = getRoute();
-      if (route.params.variant) { navigate("compare", {}); return; }
-      handleRoute(getRoute());
-    });
+    chip.title = `Compute process variants for ${displayLabel} (${sequenceCount} with a sequence)`;
+    chip.setAttribute("aria-pressed", String(type === activeType));
+    chip.innerHTML = `<span class="topbar-variant-chip__dot" style="background:${color}"></span>`
+      + `<span class="topbar-variant-chip__label">${displayLabel}</span>`
+      + `<span class="topbar-variant-chip__count">${sequenceCount}</span>`;
+    chip.addEventListener("click", () => _selectVariantEntityType(type));
     container.appendChild(chip);
   });
 }

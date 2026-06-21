@@ -2,7 +2,7 @@
 
 import { clusterColor, ellipsis, formatPercent, tooltipRows, activitySummary, entitySuffix } from "./shared.js";
 
-export function drawVariantOverview(variantLayout, dfLayout, variantData, lBg, lNodes, lLabels, cb, selectedVariant = null) {
+export function drawVariantOverview(variantLayout, variantData, lBg, lNodes, lLabels, cb, selectedVariant = null) {
   const rows = variantLayout?.rows ?? [];
   const summaryX = variantLayout?.summaryX ?? ((variantLayout?.rowX ?? 56) + (variantLayout?.rowWidth ?? 320));
 
@@ -94,51 +94,9 @@ export function drawVariantOverview(variantLayout, dfLayout, variantData, lBg, l
     });
   }
 
-  lLabels.append("text")
-    .attr("x", dfLayout?.x ?? 56).attr("y", (dfLayout?.y ?? ((variantLayout?.totalHeight ?? 0) + 34)) - 10)
-    .attr("font-family", "JetBrains Mono, monospace").attr("font-size", "10px").attr("font-weight", "700")
-    .attr("letter-spacing", "0.12em").attr("fill", "var(--text-dim)").text("ACTIVITY FLOW");
-
-  const expandX = (dfLayout?.x ?? 56) + (dfLayout?.width ?? 240) - 78;
-  const expandY = (dfLayout?.y ?? ((variantLayout?.totalHeight ?? 0) + 34)) - 27;
-  const expandG = lNodes.append("g")
-    .attr("class", "df-expand-btn")
-    .attr("transform", `translate(${expandX},${expandY})`)
-    .style("cursor", "pointer")
-    .on("click", () => cb.onDfExpand?.());
-  expandG.append("rect")
-    .attr("width", 78).attr("height", 22).attr("rx", 7)
-    .attr("fill", "rgba(255,255,255,0.9)")
-    .attr("stroke", "rgba(37,99,235,0.22)");
-  expandG.append("text")
-    .attr("x", 39).attr("y", 14).attr("text-anchor", "middle")
-    .attr("font-family", "JetBrains Mono, monospace").attr("font-size", "9px").attr("font-weight", "700")
-    .attr("fill", "var(--accent)").text("EXPAND");
-
-  lBg.append("rect")
-    .attr("x", dfLayout?.x ?? 56).attr("y", dfLayout?.y ?? ((variantLayout?.totalHeight ?? 0) + 34))
-    .attr("width", dfLayout?.width ?? 240).attr("height", dfLayout?.height ?? 200).attr("rx", 16)
-    .attr("fill", "rgba(14,17,24,0.72)").attr("stroke", "rgba(79,142,247,0.10)").attr("stroke-width", 1);
-
-  const maxEdgeCount = Math.max(...(dfLayout?.edges ?? []).map(e => e.count), 1);
-  lBg.selectAll(null).data(dfLayout?.edges ?? []).join("path")
-    .attr("class", "variant-dfg-edge").attr("d", d => `M${d.x1},${d.y1} Q${d.cx},${d.cy} ${d.x2},${d.y2}`)
-    .attr("fill", "none").attr("stroke", "rgba(79,142,247,0.28)").attr("stroke-width", d => 1 + (d.count / maxEdgeCount) * 4).attr("stroke-linecap", "round")
-    .on("mousemove", (ev, d) => cb.onTooltipShow(`<div class="tip-title">Activity Flow</div><div class="tip-row">Transition: <b>${d.source} -> ${d.target}</b></div><div class="tip-row">Count: <b>${d.count}</b></div>`, ev))
-    .on("mouseleave", cb.onTooltipHide);
-
-  const maxNodeCount = Math.max(...(dfLayout?.nodes ?? []).map(n => n.count), 1);
-  const nodeG = lNodes.selectAll(null).data(dfLayout?.nodes ?? []).join("g")
-    .attr("transform", d => `translate(${d.x},${d.y})`).style("cursor", "default")
-    .on("mousemove", (ev, d) => cb.onTooltipShow(`<div class="tip-title">${d.label}</div><div class="tip-row">Occurrences: <b>${d.count}</b></div>`, ev))
-    .on("mouseleave", cb.onTooltipHide);
-  nodeG.append("circle").attr("r", d => 8 + (d.count / maxNodeCount) * 10).attr("fill", "rgba(79,142,247,0.18)").attr("stroke", "rgba(79,142,247,0.48)").attr("stroke-width", 1.4);
-  nodeG.append("text").attr("text-anchor", "middle").attr("dy", "0.34em").attr("font-family", "JetBrains Mono, monospace").attr("font-size", "8px").attr("font-weight", "700").attr("fill", "var(--text)").text(d => Math.round(d.count));
-  lLabels.selectAll(null).data(dfLayout?.nodes ?? []).join("text")
-    .attr("x", d => d.x).attr("y", d => d.y + 24).attr("text-anchor", "middle")
-    .attr("font-family", "JetBrains Mono, monospace").attr("font-size", "8px").attr("fill", "var(--text-dim)").text(d => ellipsis(d.label, 16));
-
-  // The selected variant is described in the sidebar so the main canvas can stay focused on the graph.
+  // The activity-flow (directly-follows) graph that used to sit under the
+  // variant list has been removed. The selected variant is described in the
+  // sidebar so the main canvas stays focused on the variant rows.
 }
 
 function _rgba(value, alpha = 1) {
